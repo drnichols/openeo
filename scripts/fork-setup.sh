@@ -24,6 +24,16 @@ sanitize_git_url() {
   printf '%s\n' "$1" | sed -E 's#^(https?://)[^/@]+@#\1#; s#\.git$##'
 }
 
+print_sanitized_remotes() {
+  git remote | while read -r remote_name; do
+    [ -n "$remote_name" ] || continue
+    remote_url=$(git remote get-url "$remote_name" 2>/dev/null || echo "(unknown)")
+    remote_display_url=$(sanitize_git_url "$remote_url")
+    printf '%s\t%s (fetch)\n' "$remote_name" "$remote_display_url"
+    printf '%s\t%s (push)\n' "$remote_name" "$remote_display_url"
+  done
+}
+
 branch_upstream_ref() {
   git for-each-ref --format='%(upstream:short)' "refs/heads/$1"
 }
@@ -254,7 +264,7 @@ echo ""
 echo "=== Setup complete ==="
 echo ""
 echo "Remotes:"
-git remote -v
+print_sanitized_remotes
 echo ""
 echo "Branches:"
 git branch -a | grep -E "(main|my-patches|patch/)" | head -20

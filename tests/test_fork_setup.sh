@@ -96,7 +96,8 @@ git -C "$work_repo" remote set-url origin "https://token123@github.com/example/f
 
 (
   cd "$work_repo"
-  PUSH_TO_ORIGIN=0 UPSTREAM_URL="$upstream_repo" bash scripts/fork-setup.sh >/dev/null
+  setup_output=$(PUSH_TO_ORIGIN=0 UPSTREAM_URL="$upstream_repo" bash scripts/fork-setup.sh)
+  printf '%s\n' "$setup_output" > "$tmpdir/setup-output.txt"
 )
 
 upstream_remote=$(git -C "$work_repo" remote get-url upstream)
@@ -105,6 +106,13 @@ assert_eq "$upstream_repo" "$upstream_remote" "upstream remote should match prov
 patches_file=$(cat "$work_repo/PATCHES.md")
 assert_contains "$patches_file" "Upstream: ${upstream_repo%.git}" "PATCHES.md should record upstream URL"
 assert_contains "$patches_file" "Fork:     https://github.com/example/fork" "PATCHES.md should record sanitized fork URL"
+
+setup_output=$(cat "$tmpdir/setup-output.txt")
+assert_contains "$setup_output" "https://github.com/example/fork (fetch)" "setup output should show sanitized origin fetch URL"
+assert_contains "$setup_output" "https://github.com/example/fork (push)" "setup output should show sanitized origin push URL"
+if [[ "$setup_output" == *"token123"* ]]; then
+  fail "setup output should not include remote credentials"
+fi
 
 tree_files=$(git -C "$work_repo" ls-tree --name-only -r HEAD)
 assert_contains "$tree_files" ".codex/AGENTS.md" "my-patches commit should include .codex/AGENTS.md"
