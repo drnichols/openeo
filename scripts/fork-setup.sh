@@ -24,9 +24,15 @@ sanitize_git_url() {
   printf '%s\n' "$1" | sed -E 's#^(https?://)[^/@]+@#\1#; s#\.git$##'
 }
 
+branch_upstream_ref() {
+  git for-each-ref --format='%(upstream:short)' "refs/heads/$1"
+}
+
 push_branch_if_needed() {
   local branch="$1"
   local remote_ref="refs/remotes/origin/$branch"
+  local upstream_ref
+  upstream_ref=$(branch_upstream_ref "$branch")
 
   if [ "$PUSH_TO_ORIGIN" != "1" ]; then
     info "Skipping push of $branch because PUSH_TO_ORIGIN=$PUSH_TO_ORIGIN"
@@ -44,10 +50,18 @@ push_branch_if_needed() {
     fi
   fi
 
-  if git push origin "$branch"; then
-    ok "$branch pushed to origin"
+  if [ -z "$upstream_ref" ]; then
+    if git push --set-upstream origin "$branch"; then
+      ok "$branch pushed to origin and upstream configured"
+    else
+      info "Could not push $branch to origin automatically. Push it manually once credentials are available."
+    fi
   else
-    info "Could not push $branch to origin automatically. Push it manually once credentials are available."
+    if git push origin "$branch"; then
+      ok "$branch pushed to origin"
+    else
+      info "Could not push $branch to origin automatically. Push it manually once credentials are available."
+    fi
   fi
 }
 

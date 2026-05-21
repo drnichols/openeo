@@ -80,15 +80,24 @@ mv "$work_repo/fork-setup.sh" "$work_repo/scripts/fork-setup.sh"
 git -C "$work_repo" add scripts/fork-setup.sh
 git -C "$work_repo" commit -m "move script into scripts" >/dev/null
 git -C "$work_repo" push origin main >/dev/null
+
+(
+  cd "$work_repo"
+  UPSTREAM_URL="$upstream_repo" bash scripts/fork-setup.sh >/dev/null
+)
+
+current_branch=$(git -C "$work_repo" branch --show-current)
+assert_eq "my-patches" "$current_branch" "setup should leave repo on my-patches"
+
+tracking_branch=$(git -C "$work_repo" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}')
+assert_eq "origin/my-patches" "$tracking_branch" "setup should configure my-patches to track origin/my-patches"
+
 git -C "$work_repo" remote set-url origin "https://token123@github.com/example/fork.git"
 
 (
   cd "$work_repo"
   PUSH_TO_ORIGIN=0 UPSTREAM_URL="$upstream_repo" bash scripts/fork-setup.sh >/dev/null
 )
-
-current_branch=$(git -C "$work_repo" branch --show-current)
-assert_eq "my-patches" "$current_branch" "setup should leave repo on my-patches"
 
 upstream_remote=$(git -C "$work_repo" remote get-url upstream)
 assert_eq "$upstream_repo" "$upstream_remote" "upstream remote should match provided URL"
