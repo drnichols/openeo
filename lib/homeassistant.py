@@ -140,7 +140,8 @@ class homeassistantClassPlugin(PluginSuperClass):
             f"openeo/{device_id}/command/enable_plugin/set",
             f"openeo/{device_id}/command/schedule_start/set",
             f"openeo/{device_id}/command/schedule_end/set",
-            f"openeo/{device_id}/command/schedule_amps/set"
+            f"openeo/{device_id}/command/schedule_amps/set",
+            f"openeo/{device_id}/command/solar_enable/set",
         ]
         
         for topic in command_topics:
@@ -171,6 +172,8 @@ class homeassistantClassPlugin(PluginSuperClass):
                 self._handle_schedule_end_command(payload)
             elif topic == f"openeo/{device_id}/command/schedule_amps/set":
                 self._handle_schedule_amps_command(payload)
+            elif topic == f"openeo/{device_id}/command/solar_enable/set":
+                self._handle_solar_enable_command(payload)
             else:
                 _LOGGER.warning(f"Unknown command topic: {topic}")
                 
@@ -243,6 +246,16 @@ class homeassistantClassPlugin(PluginSuperClass):
         except Exception as e:
             _LOGGER.error(f"Error handling plugin command '{payload}': {e}")
     
+    def _handle_solar_enable_command(self, payload):
+        """Handle solar charging enable/disable commands"""
+        try:
+            solar_enabled = payload.upper() in ["ON", "TRUE", "1"]
+            globalState.configDB.set("loadmanagement", "solar_enable", solar_enabled)
+            _LOGGER.info(f"Solar charging {'enabled' if solar_enabled else 'disabled'}")
+            self._publish_state()
+        except Exception as e:
+            _LOGGER.error(f"Error handling solar enable command '{payload}': {e}")
+
     def _handle_schedule_start_command(self, payload):
         """Handle schedule start time command"""
         try:
@@ -595,6 +608,20 @@ class homeassistantClassPlugin(PluginSuperClass):
                 "device_class": "switch"
             },
             {
+                "component": "switch",
+                "object_id": "solar_enabled",
+                "name": "Solar Charging",
+                "state_topic": f"openeo/{device_id}/state",
+                "command_topic": f"openeo/{device_id}/command/solar_enable/set",
+                "value_template": "{{ 'ON' if value_json.solar_enabled else 'OFF' }}",
+                "payload_on": "ON",
+                "payload_off": "OFF",
+                "state_on": "ON",
+                "state_off": "OFF",
+                "icon": "mdi:solar-power",
+                "device_class": "switch"
+            },
+            {
                 "component": "number",
                 "object_id": "schedule_amps",
                 "name": "Schedule Current Limit",
@@ -689,6 +716,7 @@ class homeassistantClassPlugin(PluginSuperClass):
             "switch_on": self._bool_config("switch", "on"),
             "switch_enabled": self._bool_config("switch", "enabled"),
             "scheduler_enabled": self._bool_config("scheduler", "enabled"),
+            "solar_enabled": self._bool_config("loadmanagement", "solar_enable"),
             "current_limit_setting": globalState.MIN_CHARGING_CURRENT,
             "schedule_start": self._get_schedule_field("start"),
             "schedule_end": self._get_schedule_field("end"),
