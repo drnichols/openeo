@@ -37,11 +37,12 @@ class openeoConfigClass:
                     SELECT * from {self.LOG_TABLE}
                 ''')
             else:
-                # rowid keeps entries written within the same second in insertion order
+                # rowid is insertion order, and ordering by it walks the table b-tree rather than
+                # sorting the whole (unindexed) table under the lock - the main loop needs that lock
                 self.cursor.execute(f'''
                     SELECT timestamp, message FROM (
-                        SELECT rowid, timestamp, message FROM {self.LOG_TABLE} ORDER BY timestamp DESC, rowid DESC LIMIT ?
-                    ) ORDER BY timestamp ASC, rowid ASC
+                        SELECT rowid, timestamp, message FROM {self.LOG_TABLE} ORDER BY rowid DESC LIMIT ?
+                    ) ORDER BY rowid ASC
                 ''', (int(limit),))
             rows = self.cursor.fetchall()
         

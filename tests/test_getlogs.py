@@ -81,6 +81,12 @@ class LoggetLimitTests(unittest.TestCase):
     def test_limit_larger_than_table(self):
         self.assertEqual(self.messages(self.cfg.logget(limit=50)), ["one", "two", "three", "four"])
 
+    def test_limit_follows_insertion_order_when_clock_steps_back(self):
+        # e.g. NTP correcting the clock after boot: the newest entry has an older timestamp
+        self.cfg.cursor.execute("INSERT INTO log (timestamp, message) VALUES (500, 'after clock step')")
+        self.cfg.conn.commit()
+        self.assertEqual(self.messages(self.cfg.logget(limit=2)), ["four", "after clock step"])
+
 
 if __name__ == "__main__":
     unittest.main()
