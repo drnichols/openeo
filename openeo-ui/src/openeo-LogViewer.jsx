@@ -9,6 +9,8 @@ const SOURCES = [
 ];
 const LINE_OPTIONS = [200, 500, 1000, 5000];
 const REFRESH_MS = 5000;
+// The shared toggle and input styles are compact; give every toolbar control the Btn height so the row lines up
+const CONTROL = { height: "38px", boxSizing: "border-box" };
 
 export default function LogViewer() {
   const addToast = useToastContext();
@@ -90,7 +92,7 @@ export default function LogViewer() {
           {SOURCES.map((s) => (
             <button
               key={s.id}
-              style={{ ...styles.toggleBtn, ...(source === s.id && styles.toggleYesActive) }}
+              style={{ ...styles.toggleBtn, ...CONTROL, ...(source === s.id && styles.toggleYesActive) }}
               onClick={() => setSource(s.id)}
             >
               {s.label}
@@ -99,7 +101,7 @@ export default function LogViewer() {
         </div>
 
         <select
-          style={styles.textInput}
+          style={{ ...styles.textInput, ...CONTROL }}
           value={lines}
           onChange={(e) => setLines(Number(e.target.value))}
           aria-label="Number of lines"
@@ -111,7 +113,7 @@ export default function LogViewer() {
 
         <input
           type="text"
-          style={{ ...styles.textInput, flex: 1, minWidth: "160px" }}
+          style={{ ...styles.textInput, ...CONTROL, flex: 1, minWidth: "160px" }}
           placeholder="Filter…"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
@@ -119,7 +121,7 @@ export default function LogViewer() {
         />
 
         <button
-          style={{ ...styles.toggleBtn, ...(autoRefresh && styles.toggleYesActive) }}
+          style={{ ...styles.toggleBtn, ...CONTROL, ...(autoRefresh && styles.toggleYesActive) }}
           onClick={() => setAutoRefresh((v) => !v)}
         >
           Auto-refresh {autoRefresh ? "on" : "off"}
