@@ -90,7 +90,13 @@ class configserverClassPlugin(PluginSuperClass):
                 super().handle()
             except ConnectionResetError:
                 pass
-            
+
+        def log_request(self, code='-', size='-'):
+            # Keep the log viewer's polling out of the service journal (stderr), or it would flood the journal tab
+            if self.path.startswith("/getlogs"):
+                return
+            super().log_request(code, size)
+
         def do_OPTIONS(self):
             self.send_response(200)
             self.send_header("Content-type", "application/json")
