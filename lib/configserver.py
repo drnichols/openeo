@@ -20,6 +20,7 @@ import globalState, util
 from lib.PluginSuperClass import PluginSuperClass
 
 import lib.configserver_updater
+import lib.logviewer
 import os.path
 
 
@@ -105,7 +106,9 @@ class configserverClassPlugin(PluginSuperClass):
             self.end_headers()
 
         def do_GET(self):
-            globalState.configDB.logwrite(f"page GET request:{self.path}")
+            # Don't log the log viewer's own polling, or it would flood the log it is displaying
+            if not self.path.startswith("/getlogs"):
+                globalState.configDB.logwrite(f"page GET request:{self.path}")
 
             ################################
             # Prometheus exporter
@@ -219,6 +222,23 @@ class configserverClassPlugin(PluginSuperClass):
                 self.send_header("Content-type", "application/json")
                 self.end_headers()
                 self.wfile.write(json.dumps(results).encode("utf-8"))
+                return
+
+            ###################################################################
+            ## Log viewer: the app event log or the openeo service journal
+            if re.search("^/getlogs",self.path):
+                source, lines = lib.logviewer.parse_log_query(self.path)
+                if source == "journal":
+                    content = lib.logviewer.read_journal(lines)
+                else:
+                    content = globalState.configDB.logget(limit=lines)
+
+                self.send_response(200)
+                self.send_header("Content-type", "application/json")
+                if globalState.stateDict["app_version"]=="0.0" or globalState.stateDict["app_version"]=="main" :
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps({"source": source, "lines": lines, "content": content}).encode("utf-8"))
                 return
             ###################################################################
             ## expose the logger module metrics to the api, if that is available
