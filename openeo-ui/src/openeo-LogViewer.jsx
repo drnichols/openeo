@@ -125,8 +125,9 @@ export default function LogViewer() {
         <button
           style={{ ...styles.toggleBtn, ...CONTROL, ...LABEL, ...(autoRefresh && styles.toggleYesActive) }}
           onClick={() => setAutoRefresh((v) => !v)}
+          aria-pressed={autoRefresh}
         >
-          Auto-refresh {autoRefresh ? "on" : "off"}
+          Auto-refresh
         </button>
         <button style={styles.Btn} onClick={fetchLogs}>Refresh</button>
         <button style={styles.Btn} onClick={download} disabled={!visible}>Download</button>
