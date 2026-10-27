@@ -13,6 +13,8 @@ const REFRESH_MS = 5000;
 const CONTROL = { height: "38px", boxSizing: "border-box" };
 // ...and the Btn lettering, so the tabs, toggle and selector read like the Refresh/Download buttons
 const LABEL = { fontSize: styles.Btn.fontSize, letterSpacing: styles.Btn.letterSpacing, textTransform: styles.Btn.textTransform };
+// One gap for every box in the toolbar, including between the source tabs
+const TOOLBAR_GAP = "12px";
 
 export default function LogViewer() {
   const addToast = useToastContext();
@@ -89,8 +91,8 @@ export default function LogViewer() {
       <style>{globalCss}</style>
       <div style={styles.pageTitle}>// System Logs</div>
 
-      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "12px", marginBottom: "12px" }}>
-        <div style={styles.toggleGroup}>
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: TOOLBAR_GAP, marginBottom: "12px" }}>
+        <div style={{ ...styles.toggleGroup, gap: TOOLBAR_GAP }}>
           {SOURCES.map((s) => (
             <button
               key={s.id}
@@ -124,12 +126,15 @@ export default function LogViewer() {
 
         <button
           style={{ ...styles.toggleBtn, ...CONTROL, ...LABEL, ...(autoRefresh && styles.toggleYesActive) }}
-          onClick={() => setAutoRefresh((v) => !v)}
+          onClick={() => {
+            // Fetch straight away when switching on, rather than waiting for the first interval
+            if (!autoRefresh) fetchLogs();
+            setAutoRefresh((v) => !v);
+          }}
           aria-pressed={autoRefresh}
         >
           Auto-refresh
         </button>
-        <button style={styles.Btn} onClick={fetchLogs}>Refresh</button>
         <button style={styles.Btn} onClick={download} disabled={!visible}>Download</button>
       </div>
 
