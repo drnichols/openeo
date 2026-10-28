@@ -166,3 +166,157 @@ def test_decide_does_not_mutate_input():
     snapshot = dict(s)
     step(s, 0, False)
     assert s == snapshot
+
+
+# =========================
+# State file and run_once (§6.1, §6.7)
+# =========================
+
+import json
+import time
+
+import openeo_wifi_watchdog as wd
+from conftest import FakeRunner, ok
+
+UP = (("nmcli", "-g", "GENERAL.STATE,GENERAL.CONNECTION"), ok("100 (connected)\ncustom-wifi\n"))
+DOWN = (("nmcli", "-g", "GENERAL.STATE,GENERAL.CONNECTION"), ok("30 (disconnected)\n\n"))
+PIN = (("nmcli", "-g", "802-11-wireless.bssid"), ok("AA\\:BB\\:CC\\:DD\\:EE\\:01\n"))
+NOPIN = (("nmcli", "-g", "802-11-wireless.bssid"), ok("\n"))
+CLEAR = ("nmcli", "connection", "modify", "custom-wifi", "802-11-wireless.bssid", "")
+
+
+def is_con_up(call):
+    return call[:3] == ["nmcli", "connection", "up"]
+
+
+def test_load_state_corrupt_and_partial(tmp_path):
+    p = tmp_path / "state.json"
+    assert wd.load_state(p) == wd.default_state()
+    p.write_text("{not json")
+    assert wd.load_state(p) == wd.default_state()
+    p.write_text("[1, 2]")
+    assert wd.load_state(p) == wd.default_state()
+    p.write_text(json.dumps({"roam_count": 4}))
+    assert wd.load_state(p) == wd.default_state() | {"roam_count": 4}
+
+
+def test_save_state_round_trip_creates_dir(tmp_path):
+    p = tmp_path / "sub" / "state.json"
+    wd.save_state(p, wd.default_state() | {"roam_count": 2})
+    assert wd.load_state(p)["roam_count"] == 2
+
+
+def test_run_once_quiet_when_nothing_to_do(tmp_path):
+    assert wd.run_once(FakeRunner([UP, NOPIN]), 0, 1e9, tmp_path / "s.json", tmp_path / "lock") == []
+
+
+def test_run_once_failover_logs_and_persists(tmp_path):
+    st, lock = tmp_path / "s.json", tmp_path / "lock"
+    run = FakeRunner([DOWN, PIN])
+    wd.run_once(run, 0, 1e9, st, lock)
+    lines = wd.run_once(run, 60, 1e9 + 60, st, lock)
+    assert lines == ["UNPIN bssid=AA:BB:CC:DD:EE:01 reason=down down_for=60 roam_count=1",
+                     "RECONNECT reason=failover rc=0"]
+    assert list(CLEAR) in run.calls and any(is_con_up(c) for c in run.calls)
+    assert wd.load_state(st)["unpinned_by_watchdog"] is True
+
+
+def test_run_once_stops_when_setup_lock_appears(tmp_path):
+    st, lock = tmp_path / "s.json", tmp_path / "lock"
+
+    def touch_lock_on_clear(args):
+        lock.touch()
+        return ok("")
+
+    run = FakeRunner([DOWN, PIN, (CLEAR, touch_lock_on_clear)])
+    wd.run_once(run, 0, time.time(), st, lock)
+    wd.run_once(run, 60, time.time(), st, lock)   # real wall time, so the freshly touched lock is fresh
+    assert list(CLEAR) in run.calls
+    assert not any(is_con_up(c) for c in run.calls)
+
+
+def test_run_once_ignores_stale_lock(tmp_path):
+    st, lock = tmp_path / "s.json", tmp_path / "lock"
+    lock.touch()
+    run = FakeRunner([DOWN, PIN])
+    wd.run_once(run, 0, time.time() + 400, st, lock)
+    wd.run_once(run, 60, time.time() + 460, st, lock)
+    assert any(is_con_up(c) for c in run.calls)
+
+
+def test_run_once_periodic_health_fail_logs_bssid_and_loss(tmp_path, monkeypatch):
+    st, lock = tmp_path / "s.json", tmp_path / "lock"
+    wd.save_state(st, wd.default_state() | {"up_since": 0})
+    monkeypatch.setattr(wd.wp, "health_check", lambda run: wd.wp.HealthResult(False, 40, False))
+    lines = wd.run_once(FakeRunner([UP, PIN]), 200, 1e9, st, lock)
+    assert lines == ["HEALTH_FAIL bssid=AA:BB:CC:DD:EE:01 loss=40% failures=1"]
+    assert wd.load_state(st)["health_failures"] == 1
+
+
+def test_run_once_repin_passes_and_logs_repin(tmp_path, monkeypatch):
+    st, lock = tmp_path / "s.json", tmp_path / "lock"
+    wd.save_state(st, wd.default_state() | {"unpinned_by_watchdog": True, "up_since": 0})
+    sel = wd.wp.Selection("AA:BB:CC:DD:EE:02", 74, 60, 3, "pin")
+    monkeypatch.setattr(wd.wp, "choose_pin", lambda run, ssid, sleep=None: sel)
+    monkeypatch.setattr(wd.wp, "health_check", lambda run: wd.wp.HealthResult(True, 0, False))
+    monkeypatch.setattr(wd.wp, "station_info", lambda run: {"rssi": -58})
+    run = FakeRunner([UP, NOPIN])
+    lines = wd.run_once(run, 600, 1e9, st, lock)
+    assert lines == ["REPIN bssid=AA:BB:CC:DD:EE:02 signal=74 loss=0% rssi=-58"]
+    assert ["nmcli", "connection", "modify", "custom-wifi", "802-11-wireless.bssid", "AA:BB:CC:DD:EE:02"] in run.calls
+    assert any(is_con_up(c) for c in run.calls)    # always re-activates to apply the pin
+    assert wd.load_state(st)["unpinned_by_watchdog"] is False
+
+
+def test_run_once_repin_rejected_runs_clear_and_reconnect(tmp_path, monkeypatch):
+    st, lock = tmp_path / "s.json", tmp_path / "lock"
+    wd.save_state(st, wd.default_state() | {"unpinned_by_watchdog": True, "up_since": 0})
+    sel = wd.wp.Selection("AA:BB:CC:DD:EE:02", 74, 60, 3, "pin")
+    monkeypatch.setattr(wd.wp, "choose_pin", lambda run, ssid, sleep=None: sel)
+    monkeypatch.setattr(wd.wp, "health_check", lambda run: wd.wp.HealthResult(False, 100, False))
+    run = FakeRunner([UP, NOPIN])
+    lines = wd.run_once(run, 600, 1e9, st, lock)
+    assert lines == ["PIN_REJECTED bssid=AA:BB:CC:DD:EE:02 signal=74 loss=100% source=repin",
+                     "RECONNECT reason=rejected rc=0"]
+    assert list(CLEAR) in run.calls
+    assert wd.load_state(st)["repin_rejections"] == 1
+
+
+def test_run_once_repin_no_node_stays_unpinned(tmp_path, monkeypatch):
+    st, lock = tmp_path / "s.json", tmp_path / "lock"
+    wd.save_state(st, wd.default_state() | {"unpinned_by_watchdog": True, "up_since": 0})
+    monkeypatch.setattr(wd.wp, "choose_pin", lambda run, ssid, sleep=None: wd.wp.Selection(reason="single"))
+    run = FakeRunner([UP, NOPIN])
+    assert wd.run_once(run, 600, 1e9, st, lock) == []
+    assert not any(is_con_up(c) for c in run.calls)
+    assert wd.load_state(st)["last_repin_attempt"] == 600
+
+
+def test_run_once_exception_is_logged_not_raised(tmp_path):
+    def broken(args):
+        raise RuntimeError("nmcli exploded")
+    lines = wd.run_once(broken, 0, 1e9, tmp_path / "s.json", tmp_path / "lock")
+    assert len(lines) == 1 and lines[0].startswith("ERROR")
+
+
+def test_run_once_uses_injected_clock(tmp_path, monkeypatch):
+    def no_wall_clock():
+        raise AssertionError("wall clock used")
+    monkeypatch.setattr(wd.time, "time", no_wall_clock)
+    monkeypatch.setattr(wd.time, "monotonic", no_wall_clock)
+    wd.run_once(FakeRunner([UP, PIN]), 0, 1e9, tmp_path / "s.json", tmp_path / "lock")
+
+
+def test_run_once_repin_failed_activation_is_a_rejection(tmp_path, monkeypatch):
+    # A node that refuses the association must not stay pinned, even though the
+    # health check would be skipped (no gateway) and count as a pass
+    st, lock = tmp_path / "s.json", tmp_path / "lock"
+    wd.save_state(st, wd.default_state() | {"unpinned_by_watchdog": True, "up_since": 0})
+    sel = wd.wp.Selection("AA:BB:CC:DD:EE:02", 74, 60, 3, "pin")
+    monkeypatch.setattr(wd.wp, "choose_pin", lambda run, ssid, sleep=None: sel)
+    monkeypatch.setattr(wd.wp, "health_check", lambda run: wd.wp.HealthResult(True, None, True))
+    from conftest import fail
+    run = FakeRunner([UP, NOPIN, (("nmcli", "connection", "up"), [fail(4), ok("")])])
+    lines = wd.run_once(run, 600, 1e9, st, lock)
+    assert lines[0] == "PIN_REJECTED bssid=AA:BB:CC:DD:EE:02 signal=74 source=repin"
+    assert list(CLEAR) in run.calls
