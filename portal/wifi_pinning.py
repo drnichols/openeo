@@ -224,6 +224,12 @@ def profile_exists(run):
     return run(['nmcli', '-g', 'connection.id', 'connection', 'show', CONNECTION_NAME]).returncode == 0
 
 
+def profile_uuid(run):
+    """UUID of the custom-wifi profile. It changes whenever setup re-creates the profile."""
+    result = run(['nmcli', '-g', 'connection.uuid', 'connection', 'show', CONNECTION_NAME])
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
 def get_pin(run):
     result = run(['nmcli', '-g', '802-11-wireless.bssid', 'connection', 'show', CONNECTION_NAME])
     return unescape(result.stdout.strip()) if result.returncode == 0 else ""

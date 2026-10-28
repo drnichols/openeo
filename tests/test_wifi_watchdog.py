@@ -320,3 +320,25 @@ def test_run_once_repin_failed_activation_is_a_rejection(tmp_path, monkeypatch):
     lines = wd.run_once(run, 600, 1e9, st, lock)
     assert lines[0] == "PIN_REJECTED bssid=AA:BB:CC:DD:EE:02 signal=74 source=repin"
     assert list(CLEAR) in run.calls
+
+
+UUID = ("nmcli", "-g", "connection.uuid")
+
+
+def test_run_once_resets_state_when_profile_is_recreated(tmp_path):
+    # A new portal setup deletes and re-adds custom-wifi. Old watchdog state must not carry
+    # over: here it would otherwise re-pin a network that setup left unpinned
+    st, lock = tmp_path / "s.json", tmp_path / "lock"
+    wd.save_state(st, wd.default_state() | {"unpinned_by_watchdog": True, "up_since": 0,
+                                            "health_failures": 1, "profile_uuid": "old-uuid"})
+    run = FakeRunner([UP, NOPIN, (UUID, ok("new-uuid\n"))])
+    assert wd.run_once(run, 600, 1e9, st, lock) == []
+    state = wd.load_state(st)
+    assert state == wd.default_state() | {"profile_uuid": "new-uuid", "up_since": 600}
+
+
+def test_run_once_keeps_state_for_same_profile(tmp_path):
+    st, lock = tmp_path / "s.json", tmp_path / "lock"
+    wd.save_state(st, wd.default_state() | {"roam_count": 3, "profile_uuid": "same"})
+    wd.run_once(FakeRunner([UP, NOPIN, (UUID, ok("same\n"))]), 0, 1e9, st, lock)
+    assert wd.load_state(st)["roam_count"] == 3

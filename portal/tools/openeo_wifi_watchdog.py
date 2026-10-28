@@ -32,6 +32,7 @@ def default_state():
         "last_health_check": None,
         "health_failures": 0,
         "repin_rejections": 0,
+        "profile_uuid": None,
     }
 
 
@@ -270,6 +271,10 @@ def run_once(run, now, now_wall, state_path=wp.STATE_FILE, lock_path=wp.SETUP_LO
     executor = None
     try:
         state = load_state(state_path)
+        # A new portal setup re-creates the profile; nothing learned about the old one applies
+        uuid = wp.profile_uuid(run)
+        if uuid and uuid != state["profile_uuid"]:
+            state = default_state() | {"profile_uuid": uuid}
         pinned = wp.get_pin(run)
         executor = Executor(run, now, now_wall, lock_path, sleep, pinned)
         actions, state = decide(state, now,

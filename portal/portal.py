@@ -282,6 +282,11 @@ def setup_wifi_connection(ssid, password, run=None, sleep=time.sleep):
     if run is None:
         run = wifi_pinning.make_runner(sudo=True)
 
+    def connect():
+        # Refresh the lock first: a slow connect must not let it look stale to the watchdog
+        run(['touch', wifi_pinning.SETUP_LOCK])
+        return wifi_pinning.con_up(run)
+
     # The watchdog stands down while this lock exists
     run(['touch', wifi_pinning.SETUP_LOCK])
     try:
@@ -315,7 +320,7 @@ def setup_wifi_connection(ssid, password, run=None, sleep=time.sleep):
         pinned = selection.bssid if selection.bssid and wifi_pinning.set_pin(run, selection.bssid) else None
 
         # Bring up the connection
-        result = wifi_pinning.con_up(run)
+        result = connect()
 
         if pinned and result.returncode != 0:
             # The pinned node may have rejected us. Never leave the profile pinned to it
@@ -323,7 +328,7 @@ def setup_wifi_connection(ssid, password, run=None, sleep=time.sleep):
                 "bssid": pinned, "signal": selection.signal, "source": "setup"}))
             wifi_pinning.clear_pin(run)
             pinned = None
-            result = wifi_pinning.con_up(run)
+            result = connect()
         elif pinned:
             health = wifi_pinning.health_check(run)
             loss = None if health.skipped else f"{health.loss}%"
@@ -336,7 +341,7 @@ def setup_wifi_connection(ssid, password, run=None, sleep=time.sleep):
                     "bssid": pinned, "signal": selection.signal, "loss": loss, "source": "setup"}))
                 wifi_pinning.clear_pin(run)
                 pinned = None
-                result = wifi_pinning.con_up(run)
+                result = connect()
 
         success = result.returncode == 0
         message = result.stdout.strip() if success else result.stderr.strip()

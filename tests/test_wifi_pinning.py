@@ -266,3 +266,13 @@ def test_api_get_wifi_reports_pinned(monkeypatch):
     monkeypatch.setattr(portal, "get_ip_address", lambda ifname: None)
     monkeypatch.setattr(portal.wifi_pinning, "get_pin", lambda run: PIN_A)
     assert portal.api_get_wifi({})["PINNED"] == PIN_A
+
+
+def test_setup_refreshes_lock_before_every_connect(monkeypatch):
+    # A slow setup must not let the lock go stale (LOCK_STALE) while it connects
+    pick(monkeypatch, PIN_A); health(monkeypatch, False, 60)
+    run = FakeRunner([])
+    portal.setup_wifi_connection("Mesh", "password1", run=run, sleep=no_sleep)
+    ups = [i for i, c in enumerate(run.calls) if tuple(c[:4]) == NM_UP]
+    assert len(ups) == 2
+    assert all(run.calls[i - 1] == list(TOUCH) for i in ups)
