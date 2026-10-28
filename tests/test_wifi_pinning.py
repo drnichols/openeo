@@ -165,3 +165,104 @@ def test_link_up():
     assert link_up(FakeRunner([(q, ok("100 (connected)\ncustom-wifi\n"))]))
     assert not link_up(FakeRunner([(q, ok("60 (need-auth)\ncustom-wifi\n"))]))
     assert not link_up(FakeRunner([(q, ok("100 (connected)\nother\n"))]))
+
+
+# =========================
+# Portal setup flow (§5)
+# =========================
+
+import portal
+
+NM_UP = ("nmcli", "connection", "up", "custom-wifi")
+TOUCH = ("touch", "/run/openeo-wifi-setup.lock")
+RMLOCK = ("rm", "-f", "/run/openeo-wifi-setup.lock")
+PIN_A = "AA:BB:CC:DD:EE:01"
+
+
+def pick(monkeypatch, bssid, signal=80):
+    sel = portal.wifi_pinning.Selection(bssid, signal if bssid else None, 60, 3, "pin" if bssid else "single")
+    monkeypatch.setattr(portal.wifi_pinning, "choose_pin", lambda run, ssid, sleep=None: sel)
+
+
+def health(monkeypatch, passed, loss):
+    monkeypatch.setattr(portal.wifi_pinning, "health_check", lambda run: portal.wifi_pinning.HealthResult(passed, loss, False))
+
+
+def has(run, *prefix):
+    return any(tuple(c[:len(prefix)]) == prefix for c in run.calls)
+
+
+def test_setup_pins_and_keeps_healthy_pin(monkeypatch):
+    pick(monkeypatch, PIN_A); health(monkeypatch, True, 0)
+    run = FakeRunner([])
+    assert portal.setup_wifi_connection("Mesh", "password1", run=run, sleep=no_sleep) == (True, "", PIN_A, 80)
+    assert has(run, "nmcli", "connection", "modify", "custom-wifi", "802-11-wireless.bssid", PIN_A)
+    assert any("wifi-sec.psk-flags" in c and "0" in c for c in run.calls)
+    assert run.calls[0] == list(TOUCH) and run.calls[-1] == list(RMLOCK)
+
+
+def test_setup_pinned_connect_failure_unpins_and_retries(monkeypatch):
+    pick(monkeypatch, PIN_A)
+    run = FakeRunner([(NM_UP, [fail(4, "assoc rejected"), ok("Connection successfully activated")])])
+    success, msg, bssid, sig = portal.setup_wifi_connection("Mesh", "password1", run=run, sleep=no_sleep)
+    assert (success, msg, bssid, sig) == (True, "Connection successfully activated", None, None)
+    assert has(run, "nmcli", "connection", "modify", "custom-wifi", "802-11-wireless.bssid", "")
+
+
+def test_setup_failed_health_unpins_but_reports_success(monkeypatch):
+    pick(monkeypatch, PIN_A); health(monkeypatch, False, 60)
+    run = FakeRunner([])
+    success, _, bssid, _ = portal.setup_wifi_connection("Mesh", "password1", run=run, sleep=no_sleep)
+    assert (success, bssid) == (True, None)
+    assert has(run, "nmcli", "connection", "modify", "custom-wifi", "802-11-wireless.bssid", "")
+    assert len([c for c in run.calls if tuple(c[:4]) == NM_UP]) == 2
+
+
+def test_setup_no_pin_connects_unpinned(monkeypatch):
+    pick(monkeypatch, None)
+    run = FakeRunner([])
+    assert portal.setup_wifi_connection("Mesh", "password1", run=run, sleep=no_sleep)[2:] == (None, None)
+    assert not has(run, "nmcli", "connection", "modify", "custom-wifi", "802-11-wireless.bssid")
+
+
+def test_setup_wrong_password_reports_failure_unpinned(monkeypatch):
+    pick(monkeypatch, PIN_A)
+    run = FakeRunner([(NM_UP, fail(4, "Secrets were required"))])
+    assert portal.setup_wifi_connection("Mesh", "password1", run=run, sleep=no_sleep) == (False, "Secrets were required", None, None)
+
+
+def test_setup_add_failure_returns_nmcli_error(monkeypatch):
+    pick(monkeypatch, None)
+    run = FakeRunner([(("nmcli", "connection", "add"), fail(2, "bad ssid"))])
+    assert portal.setup_wifi_connection("Mesh", "password1", run=run, sleep=no_sleep) == (False, "nmcli error: bad ssid", None, None)
+    assert run.calls[-1] == list(RMLOCK)
+
+
+def test_setup_removes_lock_on_exception(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(portal.wifi_pinning, "choose_pin", boom)
+    run = FakeRunner([])
+    assert portal.setup_wifi_connection("Mesh", "password1", run=run, sleep=no_sleep)[0] is False
+    assert run.calls[-1] == list(RMLOCK)
+
+
+def test_dryrun_returns_tuple(monkeypatch):
+    monkeypatch.setattr(portal, "DRYRUN", True)
+    assert portal.setup_wifi_connection("Mesh", "password1") == (False, "dryrun - not executed", None, None)
+
+
+def test_api_set_wifi_reports_pin(monkeypatch):
+    monkeypatch.setattr(portal, "setup_wifi_connection", lambda ssid, pw: (True, "ok", PIN_A, 80))
+    monkeypatch.setattr(portal, "can_access_internet", lambda: True)
+    r = portal.api_set_wifi({"ssid": "Mesh", "password": "password1"})
+    assert (r["pinned_bssid"], r["pinned_signal"], r["connected_to_wifi"]) == (PIN_A, 80, True)
+
+
+def test_api_get_wifi_reports_pinned(monkeypatch):
+    monkeypatch.setattr(portal, "get_wifi_data", lambda: {"SSID": [], "CONNECTED": ""})
+    monkeypatch.setattr(portal, "can_access_internet", lambda: False)
+    monkeypatch.setattr(portal, "get_ssh_public_key", lambda: "")
+    monkeypatch.setattr(portal, "get_ip_address", lambda ifname: None)
+    monkeypatch.setattr(portal.wifi_pinning, "get_pin", lambda run: PIN_A)
+    assert portal.api_get_wifi({})["PINNED"] == PIN_A
