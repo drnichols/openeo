@@ -98,3 +98,70 @@ def test_scan_skips_failed_samples_and_falls_back_to_cache():
 def test_scan_all_failed_including_cache_is_noscan():
     run = FakeRunner([(("nmcli",), fail())])
     assert choose_pin(run, "Mesh", sleep=no_sleep).reason == "noscan"
+
+
+# =========================
+# Health check, station dump, nmcli wrappers (§5.1, §5.2, §6.3)
+# =========================
+
+from wifi_pinning import health_check, station_info, get_pin, link_up
+
+GW = ("nmcli", "-g", "IP4.GATEWAY", "device", "show", "wlan0")
+GW_OK = (GW, ok("192.168.1.1\n"))
+
+
+def ping_out(loss):
+    return ok(f"10 packets transmitted, {10 - loss // 10} received, {loss}% packet loss, time 1803ms\n")
+
+
+def test_health_pass_fail_boundaries():
+    for loss, passed in [(0, True), (20, True), (30, False)]:
+        r = health_check(FakeRunner([GW_OK, (("ping",), ping_out(loss))]))
+        assert (r.passed, r.loss, r.skipped) == (passed, loss, False)
+
+
+def test_health_100_percent_loss_fails_even_with_rc_1():
+    out = "10 packets transmitted, 0 received, 100% packet loss, time 9ms\n"
+    r = health_check(FakeRunner([GW_OK, (("ping",), cp(1, out))]))
+    assert (r.passed, r.loss) == (False, 100)
+
+
+def test_health_pings_gateway_on_wlan0():
+    run = FakeRunner([GW_OK, (("ping",), ping_out(0))])
+    health_check(run)
+    assert run.calls[-1] == ["ping", "-c", "10", "-i", "0.2", "-W", "1", "-I", "wlan0", "192.168.1.1"]
+
+
+def test_health_skipped_cases_count_as_pass():
+    for runner in [FakeRunner([(GW, ok("\n"))]),
+                   FakeRunner([GW_OK, (("ping",), fail(127))]),
+                   FakeRunner([GW_OK, (("ping",), ok("garbage"))])]:
+        r = health_check(runner)
+        assert (r.passed, r.skipped, r.loss) == (True, True, None)
+
+
+def test_station_info_parses_real_output():
+    dump = ("Station aa:bb:cc:dd:ee:01 (on wlan0)\n\tinactive time:\t120 ms\n\ttx retries:\t3\n\ttx failed:\t0\n"
+            "\tsignal:  \t-52 [-52] dBm\n\ttx bitrate:\t65.0 MBit/s MCS 7\n")
+    assert station_info(FakeRunner([(("iw",), ok(dump))])) == {"rssi": -52, "tx_bitrate": 65.0, "tx_retries": 3, "tx_failed": 0}
+
+
+def test_station_info_missing_fields_and_failure():
+    assert station_info(FakeRunner([(("iw",), ok("Station x (on wlan0)\n\tsignal:\t-60 dBm\n"))])) == {"rssi": -60}
+    assert station_info(FakeRunner([(("iw",), fail(127))])) == {}
+
+
+def test_get_pin_unescapes_colons():
+    run = FakeRunner([(("nmcli", "-g", "802-11-wireless.bssid"), ok("AA\\:BB\\:CC\\:DD\\:EE\\:01\n"))])
+    assert get_pin(run) == "AA:BB:CC:DD:EE:01"
+
+
+def test_get_pin_failure_is_empty():
+    assert get_pin(FakeRunner([(("nmcli",), fail(10))])) == ""
+
+
+def test_link_up():
+    q = ("nmcli", "-g", "GENERAL.STATE,GENERAL.CONNECTION")
+    assert link_up(FakeRunner([(q, ok("100 (connected)\ncustom-wifi\n"))]))
+    assert not link_up(FakeRunner([(q, ok("60 (need-auth)\ncustom-wifi\n"))]))
+    assert not link_up(FakeRunner([(q, ok("100 (connected)\nother\n"))]))

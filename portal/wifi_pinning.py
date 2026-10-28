@@ -6,6 +6,7 @@ fake one, so nothing here needs real hardware.
 """
 
 import math
+import re
 import statistics
 import subprocess
 import time
@@ -168,3 +169,84 @@ def scan_samples(run, sleep=time.sleep):
 
 def choose_pin(run, ssid, sleep=time.sleep):
     return select_bssid(scan_samples(run, sleep), ssid)
+
+
+# =========================
+# Health check and radio counters (§5.1, §5.2)
+# =========================
+
+@dataclass
+class HealthResult:
+    passed: bool
+    loss: int = None
+    skipped: bool = False
+
+
+SKIPPED = HealthResult(True, None, True)
+
+
+def health_check(run):
+    """Ping the gateway over wlan0. Anything that stops the check running counts as a pass."""
+    gateway = run(['nmcli', '-g', 'IP4.GATEWAY', 'device', 'show', WIFI_INTERFACE]).stdout.strip()
+    if not gateway:
+        return SKIPPED
+    result = run(['ping', '-c', str(HEALTH_PINGS), '-i', '0.2', '-W', '1', '-I', WIFI_INTERFACE, gateway])
+    # ping exits 1 when replies are lost, so parse the summary whatever the return code
+    match = re.search(r"(\d+(?:\.\d+)?)% packet loss", result.stdout or "")
+    if result.returncode == 127 or not match:
+        return SKIPPED
+    loss = round(float(match.group(1)))
+    return HealthResult(loss <= HEALTH_MAX_LOSS, loss, False)
+
+
+def station_info(run):
+    """Read signal and tx counters from 'iw dev wlan0 station dump'. Logged only, never acted on."""
+    result = run(['iw', 'dev', WIFI_INTERFACE, 'station', 'dump'])
+    if result.returncode != 0:
+        return {}
+    patterns = [("rssi", r"^\s*signal:\s*(-?\d+)", int),
+                ("tx_bitrate", r"^\s*tx bitrate:\s*([\d.]+)", float),
+                ("tx_retries", r"^\s*tx retries:\s*(\d+)", int),
+                ("tx_failed", r"^\s*tx failed:\s*(\d+)", int)]
+    info = {}
+    for key, pattern, conv in patterns:
+        match = re.search(pattern, result.stdout, re.MULTILINE)
+        if match:
+            info[key] = conv(match.group(1))
+    return info
+
+
+# =========================
+# nmcli wrappers for the custom-wifi profile
+# =========================
+
+def profile_exists(run):
+    return run(['nmcli', '-g', 'connection.id', 'connection', 'show', CONNECTION_NAME]).returncode == 0
+
+
+def get_pin(run):
+    result = run(['nmcli', '-g', '802-11-wireless.bssid', 'connection', 'show', CONNECTION_NAME])
+    return unescape(result.stdout.strip()) if result.returncode == 0 else ""
+
+
+def set_pin(run, bssid):
+    return run(['nmcli', 'connection', 'modify', CONNECTION_NAME, '802-11-wireless.bssid', bssid]).returncode == 0
+
+
+def clear_pin(run):
+    return set_pin(run, "")
+
+
+def con_up(run):
+    return run(['nmcli', 'connection', 'up', CONNECTION_NAME])
+
+
+def link_up(run):
+    result = run(['nmcli', '-g', 'GENERAL.STATE,GENERAL.CONNECTION', 'device', 'show', WIFI_INTERFACE])
+    lines = result.stdout.splitlines() + ["", ""]
+    return lines[0].startswith("100") and lines[1].strip() == CONNECTION_NAME
+
+
+def profile_ssid(run):
+    result = run(['nmcli', '-g', '802-11-wireless.ssid', 'connection', 'show', CONNECTION_NAME])
+    return unescape(result.stdout.strip()) if result.returncode == 0 else ""
