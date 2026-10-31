@@ -25,7 +25,7 @@ class wifi_healthClassPlugin(PluginSuperClass):
     CORE_PLUGIN = True
     pollfrequency = 2  # main loop runs every 5 s, so about every 10 s
 
-    prev = None
+    prev = None  # the last known (not unknown) status
 
     def poll(self):
         try:
@@ -33,7 +33,8 @@ class wifi_healthClassPlugin(PluginSuperClass):
             globalState.stateDict.update(wifi_status.state_fields(cur))
             for line in wifi_status.log_lines(self.prev, cur):
                 globalState.configDB.logwrite(line)
-            self.prev = cur
+            if cur.get("level") != "unknown":
+                self.prev = cur     # the last known status, compared with after an unknown gap
         except Exception as e:
             _LOGGER.warning("wifi_health poll failed: %r" % e)
         return 0

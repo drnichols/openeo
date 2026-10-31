@@ -8,6 +8,7 @@ of globalState imports so that they can be unit tested off-device.
 #################################################################################
 
 import json
+import math
 
 # A copy of the constant in portal/wifi_pinning.py: lib/ doesn't import portal/.
 STATUS_FILE = "/run/openeo-wifi-watchdog/status.json"
@@ -25,7 +26,7 @@ def read_status(path, now_wall):
         if not isinstance(status, dict) or status.get("level") not in LEVELS:
             return dict(_UNKNOWN)
         updated = status.get("updated")
-        if isinstance(updated, bool) or not isinstance(updated, (int, float)):
+        if isinstance(updated, bool) or not isinstance(updated, (int, float)) or not math.isfinite(updated):
             return dict(_UNKNOWN)
         # abs(): also rejects a future-dated file after a clock jump
         if abs(now_wall - updated) > STALE_AFTER:
@@ -50,13 +51,16 @@ def state_fields(status):
 
 
 def log_lines(prev, cur):
-    """App Events lines for what changed between two status dicts (prev is None on the first poll)."""
+    """
+    App Events lines for what changed between two status dicts. prev is the last known
+    (not unknown) status, or None before the first one: an unknown status logs nothing,
+    and the caller keeps comparing with the last known one, so a gap replays nothing.
+    """
     lines = []
     level, code = cur.get("level"), cur.get("code")
-    if prev is None:
-        if level != "unknown":
-            lines.append(f"wifi: {level} {code} - {cur.get('message')}")
-    elif (prev.get("level"), prev.get("code")) != (level, code):
+    if level == "unknown":
+        return lines
+    if prev is None or (prev.get("level"), prev.get("code")) != (level, code):
         lines.append(f"wifi: {level} {code} - {cur.get('message')}")
     # Don't replay an old event on the first poll after an app restart.
     if prev is not None and cur.get("last_event"):

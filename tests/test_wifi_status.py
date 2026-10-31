@@ -17,7 +17,8 @@ def test_read_status_missing_is_unknown(tmp_path):
 def test_read_status_rejects_garbage(tmp_path):
     p = tmp_path / "s.json"
     for body in ["{trunc", "[1]", '{"level": "purple", "updated": 1000}', '{"level": "ok", "updated": "x"}',
-                 '{"level": "ok", "updated": 699}', '{"level": "ok", "updated": 1301}']:
+                 '{"level": "ok", "updated": 699}', '{"level": "ok", "updated": 1301}',
+                 '{"level": "ok", "updated": NaN}']:
         p.write_text(body)
         assert wifi_status.read_status(p, 1000)["level"] == "unknown"
     p.write_text('{"level": "ok", "code": "ok", "message": "Wi-Fi OK", "updated": 700}')
@@ -46,6 +47,41 @@ def test_log_lines_change_only():
     assert wifi_status.log_lines(a, b) == ["wifi: problem flapping - m", "wifi: UNPIN bssid=X reason=flapping"]
     assert wifi_status.log_lines(b, b | {"last_event_at": 9}) == ["wifi: UNPIN bssid=X reason=flapping"]
     assert wifi_status.log_lines(None, b | {"level": "unknown"}) == []
+
+
+def test_log_lines_switch_to_unknown_is_silent():
+    a = {"level": "ok", "code": "ok", "message": "Wi-Fi OK", "last_event": "REPIN", "last_event_at": 5}
+    assert wifi_status.log_lines(a, {"level": "unknown", "code": "", "message": ""}) == []
+
+
+def poll_sequence(statuses):
+    """Drive the plugin's poll() through a list of read_status results; returns the lines logged."""
+    fake = SimpleNamespace(stateDict={}, configDB=mock.Mock())
+    with mock.patch.dict(sys.modules, {"globalState": fake}):
+        sys.modules.pop("lib.wifi_health", None)
+        from lib import wifi_health
+        plugin = wifi_health.wifi_healthClassPlugin.__new__(wifi_health.wifi_healthClassPlugin)
+        plugin.prev = None
+        # The lib package keeps the module from an earlier import; point it at this fake
+        with mock.patch.object(wifi_health, "globalState", fake), \
+                mock.patch.object(wifi_health.wifi_status, "read_status", side_effect=statuses):
+            for _ in statuses:
+                plugin.poll()
+        sys.modules.pop("lib.wifi_health", None)
+    return [c.args[0] for c in fake.configDB.logwrite.call_args_list]
+
+
+def test_plugin_unknown_gap_does_not_replay_or_log():
+    unknown = {"level": "unknown", "code": "", "message": ""}
+    ok = {"level": "ok", "code": "ok", "message": "Wi-Fi OK", "last_event": "REPIN", "last_event_at": 5}
+    first = ["wifi: ok ok - Wi-Fi OK"]
+    # ok -> unknown -> ok with the same event: nothing after the first poll
+    assert poll_sequence([ok, unknown, ok]) == first
+    # unknown -> problem logs the level line, and no event replay
+    problem = ok | {"level": "problem", "code": "offline", "message": "m"}
+    assert poll_sequence([ok, unknown, problem]) == first + ["wifi: problem offline - m"]
+    # An unknown first poll leaves the next known poll as the first one: no replay
+    assert poll_sequence([unknown, ok]) == first
 
 
 def test_plugin_poll_never_raises():
