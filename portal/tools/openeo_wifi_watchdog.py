@@ -88,17 +88,23 @@ def _unpin(state, now, bssid, reason, **extra):
             _con_up("failover" if reason == "down" else reason)]
 
 
-def record_events(state, events, now, *, lock_age):
-    """Fold journal events into the state. Pure: returns a new state."""
+def record_events(state, events, now, *, lock_age, setup_done_age=None):
+    """Fold journal events into the state. Pure: returns a new state.
+    setup_done_age: seconds since the portal last finished a setup, or None."""
     state = dict(state)
     state["drops"] = [list(d) for d in state["drops"] if d[0] >= now - wp.DROPS_KEEP]
     if lock_age is not None and lock_age < wp.LOCK_STALE:
         return state    # the portal is setting up Wi-Fi; its disconnects are not flaps
+    # A setup's last reconnects are often read only after its lock has gone. A setup makes
+    # a new profile, so nothing before it ended (plus the grace) counts against the new one
+    setup_end = now - setup_done_age if setup_done_age is not None else None
     last_reconnect = state["last_reconnect"]
     for event in events:
         if event.kind == "auth_fail":
             state["last_auth_fail"] = max(state["last_auth_fail"] or event.at, event.at)
             continue
+        if setup_end is not None and event.at <= setup_end + wp.SELF_RECONNECT_GRACE:
+            continue    # the setup's own reconnects
         if last_reconnect is not None and 0 <= event.at - last_reconnect <= wp.SELF_RECONNECT_GRACE:
             continue    # our own reconnect, not a drop
         drop = [event.at, wp.norm_bssid(event.bssid)]
@@ -431,7 +437,8 @@ def run_once(run, now, now_wall, state_path=wp.STATE_FILE, lock_path=wp.SETUP_LO
             state = default_state() | {"profile_uuid": uuid}
         events, state["journal_cursor"] = wp.read_wpa_events(run, state["journal_cursor"], wp.boot_id())
         lock = lock_age(lock_path, now_wall)
-        state = record_events(state, events, now, lock_age=lock)
+        state = record_events(state, events, now, lock_age=lock,
+                              setup_done_age=lock_age(wp.setup_done_path(lock_path), now_wall))
         pinned = wp.get_pin(run)
         executor = Executor(run, now, now_wall, lock_path, sleep, pinned)
         link = wp.link_state(run)

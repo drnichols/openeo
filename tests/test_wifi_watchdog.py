@@ -735,3 +735,27 @@ def test_status_has_no_secret_keys():
     st = default_state() | {"unpinned_by_watchdog": True, "excluded_bssids": [P], "last_event": "UNPIN x"}
     for status, _ in (cl(), cl(st, pinned=""), cl(profile_exists=False)):
         assert set(status) == STATUS_KEYS
+
+
+def test_record_events_ignores_drops_from_a_finished_setup():
+    # Setup ended 100 s ago (now 4000 -> setup end at 3900). Its reconnects, read only now
+    # because the lock had already gone, are not drops; a later one is.
+    ev = [WpaEvent("drop", 3870, P), WpaEvent("drop", 3899, P), WpaEvent("drop", 3925, P),
+          WpaEvent("drop", 3960, P)]
+    s = wd.record_events(wd.default_state(), ev, 4000, lock_age=None, setup_done_age=100)
+    assert s["drops"] == [[3960, P]]            # 3925 is inside the 30 s grace after setup
+
+
+def test_run_once_does_not_count_setup_reconnects_after_lock_removed(tmp_path, monkeypatch):
+    """Device 2026-10-31: setup at 22:34, lock removed, first watchdog run at 22:36 counted
+    the setup's two reconnects and showed 'Wi-Fi dropped 2 times in the last hour'."""
+    import os
+    monkeypatch.setattr(wd.wp, "boot_id", lambda: "b1")
+    st, lock = tmp_path / "s.json", tmp_path / "openeo-wifi-setup.lock"
+    done = tmp_path / "openeo-wifi-setup.done"
+    done.touch()
+    now_wall = os.stat(done).st_mtime + 90          # setup finished 90 s ago
+    events = [wd.wp.WpaEvent("drop", 1000 - 120, P), wd.wp.WpaEvent("drop", 1000 - 95, P)]
+    monkeypatch.setattr(wd.wp, "read_wpa_events", lambda run, cursor, boot: (events, "c1"))
+    wd.run_once(FakeRunner([UP, PIN]), 1000, now_wall, st, lock)
+    assert wd.load_state(st)["drops"] == []

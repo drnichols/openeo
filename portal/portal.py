@@ -357,6 +357,8 @@ def setup_wifi_connection(ssid, password, run=None, sleep=time.sleep):
     except Exception as e:
         return False, f"Exception: {str(e)}", None, None
     finally:
+        # Mark when setup ended, so the watchdog doesn't count its reconnects as drops
+        run(['touch', wifi_pinning.SETUP_DONE])
         run(['rm', '-f', wifi_pinning.SETUP_LOCK])
     
 def is_valid_key(key):

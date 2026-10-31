@@ -45,6 +45,7 @@ AUTH_FAIL_HOLD = 600
 OFFLINE_AFTER = 60
 DROPS_WARN = 2
 SETUP_LOCK = "/run/openeo-wifi-setup.lock"
+SETUP_DONE = "/run/openeo-wifi-setup.done"    # touched when a setup ends; see setup_done_path()
 STATE_FILE = "/run/openeo-wifi-watchdog/state.json"
 STATUS_FILE = "/run/openeo-wifi-watchdog/status.json"
 CONNECTION_NAME = "custom-wifi"
@@ -54,6 +55,11 @@ WIFI_INTERFACE = "wlan0"
 # =========================
 # Runner
 # =========================
+
+def setup_done_path(lock_path):
+    """The setup-finished marker that sits next to a setup lock."""
+    return os.path.splitext(str(lock_path))[0] + ".done"
+
 
 def make_runner(sudo, timeout=120):
     """Return a Runner. Missing binaries give rc 127 and timeouts rc 124.
