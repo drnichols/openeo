@@ -37,8 +37,15 @@ SELF_RECONNECT_GRACE = 30
 DROPS_KEEP = 3600
 FLAP_DROPS = 3
 FLAP_COOLOFF = 3600
+STATUS_HOLD = 3600
+WEAK_RSSI = -75
+WEAK_RUNS = 3
+AUTH_FAIL_HOLD = 600
+OFFLINE_AFTER = 60
+DROPS_WARN = 2
 SETUP_LOCK = "/run/openeo-wifi-setup.lock"
 STATE_FILE = "/run/openeo-wifi-watchdog/state.json"
+STATUS_FILE = "/run/openeo-wifi-watchdog/status.json"
 CONNECTION_NAME = "custom-wifi"
 WIFI_INTERFACE = "wlan0"
 

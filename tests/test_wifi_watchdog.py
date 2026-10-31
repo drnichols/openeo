@@ -1,6 +1,15 @@
 from openeo_wifi_watchdog import decide, after_health, default_state
 
+import pytest
+
 P = "AA:BB:CC:DD:EE:01"
+
+
+@pytest.fixture(autouse=True)
+def _status_file_in_tmp(tmp_path, monkeypatch):
+    """run_once writes the status file; never let a test write to /run."""
+    import openeo_wifi_watchdog as wd
+    monkeypatch.setattr(wd.wp, "STATUS_FILE", str(tmp_path / "status.json"))
 
 
 def step(state, now, up, pinned=P, profile=True, lock_age=None):
@@ -334,7 +343,8 @@ def test_run_once_resets_state_when_profile_is_recreated(tmp_path):
     run = FakeRunner([UP, NOPIN, (UUID, ok("new-uuid\n"))])
     assert wd.run_once(run, 600, 1e9, st, lock) == []
     state = wd.load_state(st)
-    assert state == wd.default_state() | {"profile_uuid": "new-uuid", "up_since": 600}
+    assert state == wd.default_state() | {"profile_uuid": "new-uuid", "up_since": 600,
+                                          "status_level": "ok", "status_code": "ok", "status_since": 1e9}
 
 
 def test_run_once_keeps_state_for_same_profile(tmp_path):
@@ -543,3 +553,164 @@ def test_profile_reset_clears_exclusions(tmp_path):
     wd.save_state(st, wd.default_state() | {"excluded_bssids": [P], "profile_uuid": "old"})
     wd.run_once(FakeRunner([UP, NOPIN, (UUID, ok("new\n"))]), 0, 1e9, st, lock)
     assert wd.load_state(st)["excluded_bssids"] == []
+
+
+# =========================
+# Health status (§4.4)
+# =========================
+
+from wifi_pinning import LinkState
+
+STATUS_KEYS = {"level", "code", "message", "since", "updated", "pinned_bssid", "current_bssid",
+               "rssi", "drops_1h", "excluded_bssids", "last_event", "last_event_at"}
+
+
+def cl(state=None, now=1000, now_wall=1_700_000_000, up=True, rssi=-60, pinned=P,
+       profile_exists=True, lock_age=None):
+    return wd.classify(state or default_state(), now, now_wall,
+                       profile_exists=profile_exists, lock_age=lock_age,
+                       link=LinkState(up, P if up else None, rssi), pinned=pinned, ssid="Home")
+
+
+def level_code(status):
+    return status["level"], status["code"]
+
+
+def test_classify_ok():
+    status, _ = cl()
+    assert level_code(status) == ("ok", "ok") and status["message"] == "Wi-Fi OK"
+    assert status["pinned_bssid"] == P and status["current_bssid"] == P and status["rssi"] == -60
+
+
+def test_classify_auth_failed():
+    status, _ = cl(default_state() | {"last_auth_fail": 1000 - 599})
+    assert level_code(status) == ("problem", "auth_failed") and "password" in status["message"]
+    assert cl(default_state() | {"last_auth_fail": 1000 - 601})[0]["code"] == "ok"
+
+
+def test_classify_offline():
+    status, _ = cl(default_state() | {"down_since": 940}, up=False)
+    assert level_code(status) == ("problem", "offline") and "since" in status["message"]
+    assert status["current_bssid"] is None
+    assert cl(default_state() | {"down_since": 941}, up=False)[0]["code"] != "offline"
+
+
+def test_classify_offline_time_is_wall_clock_of_drop():
+    now_wall = 1_700_000_000
+    status, _ = cl(default_state() | {"down_since": 400}, up=False, now_wall=now_wall)
+    expected = time.strftime("%H:%M", time.localtime(now_wall - 600))
+    assert expected in status["message"]
+
+
+def test_classify_flapping_and_hold():
+    st = default_state() | {"last_unpin_reason": "flapping", "last_unpin_at": 0, "unpinned_by_watchdog": True,
+                            "last_flap": {"bssid": P, "drops": 3, "span": 165}}
+    status, _ = cl(st, now=3599, pinned="")
+    assert (status["level"], status["code"]) == ("problem", "flapping")
+    assert P in status["message"] and "3 drops in 3 min" in status["message"] and "Home" in status["message"]
+    assert cl(st, now=3600, pinned="")[0]["code"] == "fallback"            # hold expired, still unpinned
+
+
+def test_classify_unstable_network():
+    st = default_state() | {"drops": [[500, P], [700, "AA:BB:CC:DD:EE:02"], [900, P]]}
+    status, _ = cl(st, pinned="")
+    assert level_code(status) == ("problem", "unstable_network")
+    # Pinned, the same drops are rule 1a's business, not "every access point"
+    assert cl(st)[0]["code"] == "drops"
+
+
+def test_classify_drops_warning():
+    status, _ = cl(default_state() | {"drops": [[100, P], [900, P]]})
+    assert level_code(status) == ("warning", "drops") and "2 times" in status["message"]
+    assert status["drops_1h"] == 2
+
+
+def test_classify_drops_1h_counts_last_hour_only():
+    status, _ = cl(default_state() | {"drops": [[5000 - 3600, P], [5000 - 3601, P]]}, now=5000)
+    assert status["drops_1h"] == 1 and status["code"] == "ok"
+
+
+def test_classify_fallback_names_bssid():
+    st = default_state() | {"unpinned_by_watchdog": True, "last_unpin_reason": "down",
+                            "last_unpin_at": 900, "excluded_bssids": [P]}
+    status, _ = cl(st, pinned="")
+    assert level_code(status) == ("warning", "fallback") and P in status["message"]
+    assert status["pinned_bssid"] is None and status["excluded_bssids"] == [P]
+
+
+def test_classify_weak_signal_needs_three_runs():
+    s = default_state()
+    for i in range(2):
+        status, s = cl(s, rssi=-75); assert status["code"] == "ok"
+    status, s = cl(s, rssi=-75); assert status["code"] == "weak_signal"
+    assert status["level"] == "warning" and "-75 dBm" in status["message"]
+    status, s = cl(s, rssi=-74); assert status["code"] == "ok" and s["weak_runs"] == 0
+
+
+def test_classify_unknown_when_no_profile_or_lock():
+    st = default_state() | {"weak_runs": 2, "status_level": "ok", "status_code": "ok", "status_since": 5,
+                            "last_auth_fail": 1000}
+    for status, s in (cl(st, profile_exists=False, rssi=-80), cl(st, lock_age=10, rssi=-80)):
+        assert (status["level"], status["code"], status["message"]) == ("unknown", "", "")
+        assert s["weak_runs"] == 2 and s["status_since"] == 5
+    assert cl(st, lock_age=wd.wp.LOCK_STALE)[0]["level"] == "problem"   # a stale lock is ignored
+
+
+def test_classify_precedence():
+    st = default_state() | {"last_auth_fail": 990, "down_since": 900, "drops": [[100, P], [200, P]]}
+    assert cl(st, up=False)[0]["code"] == "auth_failed"
+    st = default_state() | {"down_since": 900, "unpinned_by_watchdog": True, "excluded_bssids": [P]}
+    assert cl(st, up=False, pinned="")[0]["code"] == "offline"
+
+
+def test_classify_since_stable():
+    _, s = cl(now=1000); assert s["status_since"] == 1_700_000_000
+    status, s = cl(s, now=1060, now_wall=1_700_000_060)   # same level/code
+    assert status["since"] == 1_700_000_000 and status["updated"] == 1_700_000_060
+    status, s = cl(s | {"down_since": 1000}, now=1120, now_wall=1_700_000_120, up=False)
+    assert status["code"] == "offline" and status["since"] == 1_700_000_120
+
+
+def test_classify_does_not_mutate_input():
+    st = default_state()
+    before = json.dumps(st)
+    cl(st, rssi=-80)
+    assert json.dumps(st) == before
+
+
+def test_save_status_modes(tmp_path):
+    p = tmp_path / "d" / "status.json"; wd.save_status(p, {"level": "ok"})
+    assert oct(p.stat().st_mode & 0o777) == "0o644" and oct(p.parent.stat().st_mode & 0o777) == "0o755"
+    assert json.loads(p.read_text()) == {"level": "ok"}
+
+
+def test_run_once_writes_status_and_last_event(tmp_path):
+    st, lock, sp = tmp_path / "s.json", tmp_path / "lock", tmp_path / "out" / "status.json"
+    run = FakeRunner([DOWN, PIN])
+    wd.run_once(run, 0, 1e9, st, lock, status_path=sp)
+    wd.run_once(run, 60, 1e9 + 60, st, lock, status_path=sp)
+    status = json.loads(sp.read_text())
+    assert level_code(status) in (("problem", "offline"), ("warning", "fallback"))
+    assert status["last_event"].startswith("UNPIN") and status["last_event_at"] == 1e9 + 60
+    assert status["updated"] == 1e9 + 60 and set(status) == STATUS_KEYS
+    assert wd.load_state(st)["last_event"].startswith("UNPIN")
+
+
+def test_run_once_status_defaults_to_status_file(tmp_path):
+    wd.run_once(FakeRunner([UP, NOPIN]), 0, 1e9, tmp_path / "s.json", tmp_path / "lock")
+    assert level_code(json.loads((tmp_path / "status.json").read_text())) == ("ok", "ok")
+
+
+def test_run_once_error_leaves_status_untouched(tmp_path):
+    sp = tmp_path / "status.json"
+    sp.write_text(json.dumps({"updated": 1}))
+    def broken(args):
+        raise RuntimeError("nmcli exploded")
+    wd.run_once(broken, 0, 1e9, tmp_path / "s.json", tmp_path / "lock", status_path=sp)
+    assert json.loads(sp.read_text()) == {"updated": 1}
+
+
+def test_status_has_no_secret_keys():
+    st = default_state() | {"unpinned_by_watchdog": True, "excluded_bssids": [P], "last_event": "UNPIN x"}
+    for status, _ in (cl(), cl(st, pinned=""), cl(profile_exists=False)):
+        assert set(status) == STATUS_KEYS

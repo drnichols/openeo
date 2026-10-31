@@ -8,6 +8,7 @@ around them gathers inputs and carries out the actions. See the design spec §6.
 """
 
 import json
+import math
 import os
 import sys
 import tempfile
@@ -40,6 +41,12 @@ def default_state():
         "last_unpin_reason": None,
         "last_unpin_at": None,
         "last_flap": None,      # {"bssid", "drops", "span"} of the last flapping unpin
+        "weak_runs": 0,         # consecutive runs with a weak signal
+        "status_level": None,   # the last status written, so 'since' survives between runs
+        "status_code": None,
+        "status_since": None,   # wall-clock epoch
+        "last_event": None,     # last executor line other than RECONNECT
+        "last_event_at": None,  # wall-clock epoch
     }
 
 
@@ -196,6 +203,77 @@ def after_health(state, now, source, passed, bssid=None):
 
 
 # =========================
+# Health status (spec §4.4)
+# =========================
+
+def _health(state, now, now_wall, link, pinned, ssid, drops_1h):
+    """The first matching (level, code, message), in the spec table's order."""
+    if state["last_auth_fail"] is not None and now - state["last_auth_fail"] <= wp.AUTH_FAIL_HOLD:
+        return ("problem", "auth_failed",
+                "The Wi-Fi password was rejected. Check it in the setup portal, "
+                "or check whether it changed on your router.")
+    if not link.up and state["down_since"] is not None and now - state["down_since"] >= wp.OFFLINE_AFTER:
+        down_at = time.strftime("%H:%M", time.localtime(now_wall - (now - state["down_since"])))
+        return "problem", "offline", f"Not connected to Wi-Fi since {down_at}."
+    if (state["last_unpin_reason"] == "flapping" and state["last_unpin_at"] is not None
+            and now - state["last_unpin_at"] < wp.STATUS_HOLD):
+        flap = state["last_flap"] or {}
+        minutes = max(1, math.ceil(flap.get("span", 0) / 60))
+        return ("problem", "flapping",
+                f"Access point {flap.get('bssid') or 'unknown'} kept disconnecting the charger "
+                f"({flap.get('drops', 0)} drops in {minutes} min). It now connects to any access point "
+                f"on {ssid}. If this repeats, check that access point's minimum-signal (min-RSSI) "
+                f"setting or its position.")
+    recent = [d for d in state["drops"] if now - d[0] <= wp.FLAP_WINDOW]
+    if not pinned and len(recent) >= wp.FLAP_DROPS:
+        return ("problem", "unstable_network",
+                "Wi-Fi keeps dropping on every access point. The signal at the charger may be "
+                "too weak, or the network may be dropping it.")
+    if state["unpinned_by_watchdog"]:
+        bad = state["excluded_bssids"][-1] if state["excluded_bssids"] else "an access point"
+        return ("warning", "fallback",
+                f"Running without a fixed access point after a problem with {bad}. "
+                f"It will try another access point later.")
+    if drops_1h >= wp.DROPS_WARN:
+        return "warning", "drops", f"Wi-Fi dropped {drops_1h} times in the last hour."
+    if state["weak_runs"] >= wp.WEAK_RUNS:
+        return ("warning", "weak_signal",
+                f"Weak Wi-Fi signal at the charger ({link.rssi} dBm). Access points may disconnect it.")
+    return "ok", "ok", "Wi-Fi OK"
+
+
+def classify(state, now, now_wall, *, profile_exists, lock_age, link, pinned, ssid):
+    """This run's health status for the owner. Pure: returns (status, new_state)."""
+    state = dict(state)
+    drops_1h = sum(1 for d in state["drops"] if now - d[0] <= 3600)
+    if not profile_exists or (lock_age is not None and lock_age < wp.LOCK_STALE):
+        level, code, message, since = "unknown", "", "", None
+    else:
+        weak = link.rssi is not None and link.rssi <= wp.WEAK_RSSI
+        state["weak_runs"] = state["weak_runs"] + 1 if weak else 0
+        level, code, message = _health(state, now, now_wall, link, pinned, ssid, drops_1h)
+        if (level, code) != (state["status_level"], state["status_code"]):
+            state["status_level"], state["status_code"] = level, code
+            state["status_since"] = int(now_wall)
+        since = state["status_since"]
+    status = {
+        "level": level,
+        "code": code,
+        "message": message,
+        "since": since,
+        "updated": int(now_wall),
+        "pinned_bssid": wp.norm_bssid(pinned) or None,
+        "current_bssid": wp.norm_bssid(link.bssid) or None,
+        "rssi": link.rssi,
+        "drops_1h": drops_1h,
+        "excluded_bssids": list(state["excluded_bssids"]),
+        "last_event": state["last_event"],
+        "last_event_at": state["last_event_at"],
+    }
+    return status, state
+
+
+# =========================
 # State file
 # =========================
 
@@ -218,6 +296,19 @@ def save_state(path, state):
     fd, tmp = tempfile.mkstemp(dir=directory)
     with os.fdopen(fd, "w") as f:
         json.dump(state, f)
+    os.replace(tmp, path)
+
+
+def save_status(path, status):
+    """Write the status file atomically and world-readable: it holds no secrets, and the
+    main app (not root) reads it."""
+    directory = os.path.dirname(os.fspath(path))
+    os.makedirs(directory, exist_ok=True)
+    os.chmod(directory, 0o755)
+    fd, tmp = tempfile.mkstemp(dir=directory)
+    with os.fdopen(fd, "w") as f:
+        json.dump(status, f)
+    os.chmod(tmp, 0o644)
     os.replace(tmp, path)
 
 
@@ -318,8 +409,11 @@ class Executor:
         return self.execute(more, state)
 
 
-def run_once(run, now, now_wall, state_path=wp.STATE_FILE, lock_path=wp.SETUP_LOCK, sleep=time.sleep):
-    """One watchdog run. 'now' is monotonic time; returns the log lines it printed."""
+def run_once(run, now, now_wall, state_path=wp.STATE_FILE, lock_path=wp.SETUP_LOCK, sleep=time.sleep,
+             status_path=None):
+    """One watchdog run. 'now' is monotonic time; returns the log lines it printed.
+    status_path None means wp.STATUS_FILE. A run that ends in ERROR leaves the status file
+    alone, so the main app sees it go stale."""
     executor = None
     try:
         state = load_state(state_path)
@@ -333,10 +427,11 @@ def run_once(run, now, now_wall, state_path=wp.STATE_FILE, lock_path=wp.SETUP_LO
         pinned = wp.get_pin(run)
         executor = Executor(run, now, now_wall, lock_path, sleep, pinned)
         link = wp.link_state(run)
+        profile_exists = wp.profile_exists(run)
         actions, state = decide(state, now,
                                 link_up=link.up,
                                 pinned=pinned,
-                                profile_exists=wp.profile_exists(run),
+                                profile_exists=profile_exists,
                                 lock_age=lock)
         save_state(state_path, state)
         try:
@@ -344,6 +439,19 @@ def run_once(run, now, now_wall, state_path=wp.STATE_FILE, lock_path=wp.SETUP_LO
         except SetupStarted:
             pass
         save_state(state_path, state)
+
+        events = [line for line in executor.lines if not line.startswith("RECONNECT")]
+        if events:
+            state["last_event"], state["last_event_at"] = events[-1], int(now_wall)
+        # The actions may have changed the pin
+        status, state = classify(state, now, now_wall,
+                                 profile_exists=profile_exists,
+                                 lock_age=lock,
+                                 link=link,
+                                 pinned=wp.get_pin(run),
+                                 ssid=wp.profile_ssid(run))
+        save_state(state_path, state)
+        save_status(status_path or wp.STATUS_FILE, status)
         return executor.lines
     except Exception as e:
         line = f"ERROR {type(e).__name__}: {e}"
