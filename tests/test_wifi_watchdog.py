@@ -459,6 +459,19 @@ def test_replay_2026_10_30_unpins_at_15_30_57():
     assert s["excluded_bssids"] == ["02:EC:DA:FD:20:A6"]
 
 
+def test_repin_does_not_count_drops_from_before_the_pin():
+    B = "AA:BB:CC:DD:EE:02"
+    s = default_state() | {"unpinned_by_watchdog": True, "drops": [[3300, B], [3400, B], [3500, B]]}
+    _, s = after_health(s, 3600, "repin", True, bssid=B)
+    assert s["pinned_at"] == 3600
+    a, s = step(s, 3660, True, pinned=B)
+    assert "UNPIN" not in events(a)
+    s = s | {"drops": s["drops"] + [[3700, B], [3800, B], [3900, B]]}
+    a, s = step(s, 3960, True, pinned=B)
+    assert events(a) == ["UNPIN"] and a[1].fields["reason"] == "flapping" and a[1].fields["drops"] == 3
+    assert s["pinned_at"] is None
+
+
 def test_every_unpin_excludes():
     s = default_state()
     _, s = step(s, 0, False)
@@ -583,9 +596,17 @@ def test_classify_ok():
 
 
 def test_classify_auth_failed():
-    status, _ = cl(default_state() | {"last_auth_fail": 1000 - 599})
+    status, _ = cl(default_state() | {"last_auth_fail": 1000 - 599}, up=False)
     assert level_code(status) == ("problem", "auth_failed") and "password" in status["message"]
-    assert cl(default_state() | {"last_auth_fail": 1000 - 601})[0]["code"] == "ok"
+    assert cl(default_state() | {"last_auth_fail": 1000 - 601}, up=False)[0]["code"] != "auth_failed"
+
+
+def test_classify_auth_fail_ignored_while_connected():
+    # Handshake timeouts while an AP flaps log WRONG_KEY with a correct password
+    st = default_state() | {"last_auth_fail": 990, "last_unpin_reason": "flapping", "last_unpin_at": 900,
+                            "unpinned_by_watchdog": True, "last_flap": {"bssid": P, "drops": 3, "span": 165}}
+    assert level_code(cl(st, pinned="")[0]) == ("problem", "flapping")
+    assert level_code(cl(default_state() | {"last_auth_fail": 990})[0]) == ("ok", "ok")
 
 
 def test_classify_offline():
@@ -653,7 +674,7 @@ def test_classify_unknown_when_no_profile_or_lock():
     for status, s in (cl(st, profile_exists=False, rssi=-80), cl(st, lock_age=10, rssi=-80)):
         assert (status["level"], status["code"], status["message"]) == ("unknown", "", "")
         assert s["weak_runs"] == 2 and s["status_since"] == 5
-    assert cl(st, lock_age=wd.wp.LOCK_STALE)[0]["level"] == "problem"   # a stale lock is ignored
+    assert cl(st, lock_age=wd.wp.LOCK_STALE, up=False)[0]["level"] == "problem"   # a stale lock is ignored
 
 
 def test_classify_precedence():

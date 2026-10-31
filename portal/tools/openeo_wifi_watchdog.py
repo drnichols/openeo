@@ -41,6 +41,7 @@ def default_state():
         "last_unpin_reason": None,
         "last_unpin_at": None,
         "last_flap": None,      # {"bssid", "drops", "span"} of the last flapping unpin
+        "pinned_at": None,      # when the watchdog re-pinned; None for a pin set by setup
         "weak_runs": 0,         # consecutive runs with a weak signal
         "status_level": None,   # the last status written, so 'since' survives between runs
         "status_code": None,
@@ -75,6 +76,7 @@ def _unpin(state, now, bssid, reason, **extra):
     _exclude(state, bssid)
     state["last_unpin_reason"] = reason
     state["last_unpin_at"] = now
+    state["pinned_at"] = None
     state["unpinned_by_watchdog"] = True
     state["roam_count"] += 1
     state["last_reconnect"] = now
@@ -127,7 +129,10 @@ def decide(state, now, *, link_up, pinned, profile_exists, lock_age):
     # Rule 1a: flapping. The pinned node keeps dropping us; let NM roam by SSID instead
     if pinned:
         pin = wp.norm_bssid(pinned)
-        recent = [at for at, bssid in state["drops"] if bssid == pin and now - at <= wp.FLAP_WINDOW]
+        # Drops from before a watchdog re-pin happened while unpinned; they are not this pin's
+        recent = [at for at, bssid in state["drops"]
+                  if bssid == pin and now - at <= wp.FLAP_WINDOW
+                  and (state["pinned_at"] is None or at >= state["pinned_at"])]
         if len(recent) >= wp.FLAP_DROPS:
             actions = _unpin(state, now, pinned, "flapping", drops=len(recent), window=wp.FLAP_WINDOW)
             state["drops"] = []
@@ -185,6 +190,7 @@ def after_health(state, now, source, passed, bssid=None):
     state["up_since"] = None
     if passed:
         state["unpinned_by_watchdog"] = False
+        state["pinned_at"] = now
         state["last_health_check"] = now
         state["health_failures"] = 0
         state["repin_rejections"] = 0
@@ -208,7 +214,9 @@ def after_health(state, now, source, passed, bssid=None):
 
 def _health(state, now, now_wall, link, pinned, ssid, drops_1h):
     """The first matching (level, code, message), in the spec table's order."""
-    if state["last_auth_fail"] is not None and now - state["last_auth_fail"] <= wp.AUTH_FAIL_HOLD:
+    # Only while disconnected: handshake timeouts during AP flapping also log WRONG_KEY
+    if (not link.up and state["last_auth_fail"] is not None
+            and now - state["last_auth_fail"] <= wp.AUTH_FAIL_HOLD):
         return ("problem", "auth_failed",
                 "The Wi-Fi password was rejected. Check it in the setup portal, "
                 "or check whether it changed on your router.")
@@ -245,7 +253,7 @@ def _health(state, now, now_wall, link, pinned, ssid, drops_1h):
 def classify(state, now, now_wall, *, profile_exists, lock_age, link, pinned, ssid):
     """This run's health status for the owner. Pure: returns (status, new_state)."""
     state = dict(state)
-    drops_1h = sum(1 for d in state["drops"] if now - d[0] <= 3600)
+    drops_1h = sum(1 for d in state["drops"] if now - d[0] <= wp.DROPS_KEEP)
     if not profile_exists or (lock_age is not None and lock_age < wp.LOCK_STALE):
         level, code, message, since = "unknown", "", "", None
     else:
