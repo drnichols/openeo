@@ -114,6 +114,17 @@ def test_ha_entities():
     assert "'none'" in ents["wifi_pinned_ap"]["value_template"]
 
 
+def test_ha_wifi_health_is_an_enum_of_every_published_level():
+    # An enum sensor lets HA offer the values in automations; HA flags a state that isn't
+    # among the options, so they must cover every level read_status/state_fields can publish
+    health = {e["object_id"]: e for e in wifi_status.ha_entities("t")}["wifi_health"]
+    assert health["device_class"] == "enum"
+    assert health["options"] == ["ok", "warning", "problem", "unknown"]
+    assert set(health["options"]) == set(wifi_status.LEVELS)
+    pinned = {e["object_id"]: e for e in wifi_status.ha_entities("t")}["wifi_pinned_ap"]
+    assert "device_class" not in pinned          # a MAC address is free text, not an enum
+
+
 def test_ha_templates_render():
     import json
     import pytest

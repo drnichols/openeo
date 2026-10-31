@@ -90,6 +90,9 @@ def ha_entities(state_topic):
             "name": "Wi-Fi Health",
             "state_topic": state_topic,
             "value_template": "{{ value_json.wifi_health }}",
+            # enum: HA offers these values in automation editors; states stay lowercase machine values
+            "device_class": "enum",
+            "options": list(LEVELS),
             "json_attributes_topic": state_topic,
             "json_attributes_template": "{{ {'code': value_json.wifi_health_code, 'message': value_json.wifi_health_message, 'since': value_json.wifi_health_since} | tojson }}",
             "icon": "mdi:wifi-alert",
