@@ -342,3 +342,11 @@ def test_run_once_keeps_state_for_same_profile(tmp_path):
     wd.save_state(st, wd.default_state() | {"roam_count": 3, "profile_uuid": "same"})
     wd.run_once(FakeRunner([UP, NOPIN, (UUID, ok("same\n"))]), 0, 1e9, st, lock)
     assert wd.load_state(st)["roam_count"] == 3
+
+
+def test_run_once_sees_drop_from_iw_while_nm_still_up(tmp_path):
+    st, lock = tmp_path / "s.json", tmp_path / "lock"
+    run = FakeRunner([UP, PIN, (("iw", "dev", "wlan0", "link"), ok("Not connected.\n"))])
+    wd.run_once(run, 0, 1e9, st, lock)
+    lines = wd.run_once(run, 60, 1e9 + 60, st, lock)
+    assert lines[0] == "UNPIN bssid=AA:BB:CC:DD:EE:01 reason=down down_for=60 roam_count=1"

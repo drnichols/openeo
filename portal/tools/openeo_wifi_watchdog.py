@@ -277,8 +277,9 @@ def run_once(run, now, now_wall, state_path=wp.STATE_FILE, lock_path=wp.SETUP_LO
             state = default_state() | {"profile_uuid": uuid}
         pinned = wp.get_pin(run)
         executor = Executor(run, now, now_wall, lock_path, sleep, pinned)
+        link = wp.link_state(run)
         actions, state = decide(state, now,
-                                link_up=wp.link_up(run),
+                                link_up=link.up,
                                 pinned=pinned,
                                 profile_exists=wp.profile_exists(run),
                                 lock_age=lock_age(lock_path, now_wall))

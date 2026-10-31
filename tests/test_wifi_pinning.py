@@ -291,3 +291,41 @@ def test_log_message_redacts(capsys):
     handler.log_message('"%s" %s %s', "GET /api/set_wifi?ssid=x&password=hunter22 HTTP/1.1", "200", "-")
     out = capsys.readouterr().out
     assert "hunter22" not in out and "password=***" in out
+
+
+# =========================
+# Link state (iw + NM)
+# =========================
+
+from wifi_pinning import link_state, LinkState, norm_bssid
+
+NMQ = ("nmcli", "-g", "GENERAL.STATE,GENERAL.CONNECTION")
+IWQ = ("iw", "dev", "wlan0", "link")
+NM_UP_OUT = ok("100 (connected)\ncustom-wifi\n")
+IW_CONNECTED = ok("Connected to 02:ec:da:fd:20:a6 (on wlan0)\n\tSSID: Home\n\tsignal: -64 dBm\n")
+
+
+def test_link_state_nm_up_and_iw_connected():
+    s = link_state(FakeRunner([(NMQ, NM_UP_OUT), (IWQ, IW_CONNECTED)]))
+    assert s == LinkState(True, "02:EC:DA:FD:20:A6", -64)
+
+
+def test_link_state_iw_not_connected_is_down():
+    assert not link_state(FakeRunner([(NMQ, NM_UP_OUT), (IWQ, ok("Not connected.\n"))])).up
+
+
+def test_link_state_iw_missing_is_nm_only():
+    assert link_state(FakeRunner([(NMQ, NM_UP_OUT), (IWQ, fail(127))])) == LinkState(True, None, None)
+
+
+def test_link_state_unrecognised_iw_output_is_nm_only():
+    assert link_state(FakeRunner([(NMQ, NM_UP_OUT), (IWQ, ok(""))])).up
+    assert link_state(FakeRunner([(NMQ, NM_UP_OUT), (IWQ, ok("command failed: No such device (-19)\n"))])).up
+
+
+def test_link_state_nm_down_wins():
+    assert not link_state(FakeRunner([(NMQ, ok("30 (disconnected)\n\n")), (IWQ, IW_CONNECTED)])).up
+
+
+def test_norm_bssid():
+    assert norm_bssid(" 02:ec:da:fd:20:a6\n") == "02:EC:DA:FD:20:A6" and norm_bssid(None) == ""

@@ -247,10 +247,46 @@ def con_up(run):
     return run(['nmcli', 'connection', 'up', CONNECTION_NAME])
 
 
-def link_up(run):
+def norm_bssid(b):
+    return (b or "").strip().upper()
+
+
+@dataclass
+class LinkState:
+    up: bool
+    bssid: str | None = None
+    rssi: int | None = None
+
+    def __post_init__(self):
+        if self.bssid is not None:
+            self.bssid = norm_bssid(self.bssid) or None
+
+
+def iw_link(run):
+    """Kernel view of the link: (state, bssid, rssi); state is connected, disconnected or unknown."""
+    result = run(['iw', 'dev', WIFI_INTERFACE, 'link'])
+    if result.returncode != 0:
+        return "unknown", None, None
+    out = result.stdout
+    m = re.search(r'Connected to ([0-9A-Fa-f:]{17})', out)
+    if m:
+        sig = re.search(r'signal:\s*(-?\d+)', out)
+        return "connected", norm_bssid(m.group(1)), int(sig.group(1)) if sig else None
+    if 'Not connected' in out:
+        return "disconnected", None, None
+    return "unknown", None, None
+
+
+def link_state(run):
     result = run(['nmcli', '-g', 'GENERAL.STATE,GENERAL.CONNECTION', 'device', 'show', WIFI_INTERFACE])
     lines = result.stdout.splitlines() + ["", ""]
-    return lines[0].startswith("100") and lines[1].strip() == CONNECTION_NAME
+    nm_up = lines[0].startswith("100") and lines[1].strip() == CONNECTION_NAME
+    state, bssid, rssi = iw_link(run)
+    return LinkState(nm_up and state != "disconnected", bssid, rssi)
+
+
+def link_up(run):
+    return link_state(run).up
 
 
 def profile_ssid(run):
