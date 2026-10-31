@@ -19,7 +19,10 @@ const TOOLBAR_GAP = "12px";
 export default function LogViewer() {
   const addToast = useToastContext();
 
-  const [source, setSource] = useState("app");
+  const [source, setSource] = useState(() => {
+    const wanted = new URLSearchParams(window.location.search).get("source");
+    return SOURCES.some((s) => s.id === wanted) ? wanted : "app";
+  });
   const [lines, setLines] = useState(500);
   const [filter, setFilter] = useState("");
   const [autoRefresh, setAutoRefresh] = useState(false);
