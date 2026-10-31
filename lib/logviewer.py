@@ -21,12 +21,19 @@ MAX_LINES = 5000
 JOURNAL_TIMEOUT = 10
 
 WIFI_UNITS = ("openeo_wifi_watchdog", "openeo_portal", "wpa_supplicant")
-WIFI_SCAN_LINES = 20000
+# journalctl time grows with matches: 1000 took 1.8 s on a Pi Zero W, 5000 up to 9.2 s
+# under load, too close to JOURNAL_TIMEOUT for a tab that auto-refreshes every 5 s
+WIFI_MAX_LINES = 1000
 # Allowlist: old setup-portal request lines contain the Wi-Fi password, so only
 # lines whose message starts with a known event name may ever be shown.
 WIFI_EVENTS = frozenset({"PIN", "PIN_REJECTED", "UNPIN", "REPIN", "REPIN_GIVEUP", "RECONNECT", "HEALTH_FAIL", "ERROR"})
+_LIFECYCLE = (r"\[STARTUP\]", r"\[SHUTDOWN\]")
+_WPA_EVENTS = r"wlan0: CTRL-EVENT-(DISCONNECTED|ASSOC-REJECT|SSID-TEMP-DISABLED|CONNECTED)"
 _JOURNAL_MESSAGE = re.compile(r"^\S+ \S+ [^\s\[:]+(?:\[\d+\])?: (.*)$")
-_WPA_EVENT = re.compile(r"^wlan0: CTRL-EVENT-(DISCONNECTED|ASSOC-REJECT|SSID-TEMP-DISABLED|CONNECTED)\b")
+_WPA_EVENT = re.compile("^" + _WPA_EVENTS + r"\b")
+# journalctl --grep pattern for the same messages. It only narrows what journalctl reads,
+# so the read stays fast on a large journal; is_wifi_event() remains the security gate.
+WIFI_GREP = "^(" + "|".join(sorted(WIFI_EVENTS) + list(_LIFECYCLE) + [_WPA_EVENTS]) + ")( |$)"
 
 
 def parse_log_query(path):
@@ -49,15 +56,16 @@ def parse_log_query(path):
     return source, lines
 
 
-def read_journal(lines, units=("openeo",)):
+def _journalctl(args, no_match_ok=False):
     """
-    Returns the last n lines of the given service journals as a string. Arguments are
-    passed as a list (no shell), so nothing from the request can reach a shell.
+    Runs journalctl with the given arguments and returns its output, or an "Error: ..."
+    string. Arguments are passed as a list (no shell), so nothing from the request can
+    reach a shell. With --grep, journalctl exits 1 with an empty stderr when nothing
+    matches; no_match_ok turns that into empty output.
     """
-    unit_args = [arg for unit in units for arg in ("-u", unit)]
     try:
         result = subprocess.run(
-            ["journalctl", *unit_args, "-n", str(int(lines)), "--no-pager", "-o", "short-iso"],
+            ["journalctl", *args, "--no-pager", "-o", "short-iso"],
             capture_output=True,
             text=True,
             timeout=JOURNAL_TIMEOUT,
@@ -67,9 +75,20 @@ def read_journal(lines, units=("openeo",)):
     except subprocess.TimeoutExpired:
         return f"Error: journalctl did not respond within {JOURNAL_TIMEOUT}s"
 
+    if no_match_ok and result.returncode == 1 and not result.stderr.strip():
+        return ""
     if result.returncode != 0:
         return f"Error: {result.stderr.strip() or 'journalctl exited with code ' + str(result.returncode)}"
     return result.stdout
+
+
+def _unit_args(units):
+    return [arg for unit in units for arg in ("-u", unit)]
+
+
+def read_journal(lines):
+    """Returns the last n lines of the openeo service journal as a string."""
+    return _journalctl([*_unit_args(("openeo",)), "-n", str(int(lines))])
 
 
 def is_wifi_event(line):
@@ -100,8 +119,16 @@ def filter_wifi_lines(text, lines):
 
 
 def read_wifi_log(lines):
-    """Returns the last n Wi-Fi event lines, or the Error: text if the journal could not be read."""
-    text = read_journal(WIFI_SCAN_LINES, WIFI_UNITS)
+    """
+    Returns the last n Wi-Fi event lines, oldest first, or the Error: text if the journal
+    could not be read. journalctl filters with WIFI_GREP and reads newest-first (-r), so it
+    stops after n matches rather than formatting the whole journal. n is capped at
+    WIFI_MAX_LINES.
+    """
+    lines = min(int(lines), WIFI_MAX_LINES)
+    text = _journalctl([*_unit_args(WIFI_UNITS), "--grep", WIFI_GREP, "-r", "-n", str(lines)],
+                       no_match_ok=True)
     if text.startswith("Error:"):
         return text
-    return filter_wifi_lines(text, lines)
+    oldest_first = "\n".join(reversed(text.split("\n")))
+    return filter_wifi_lines(oldest_first, lines)

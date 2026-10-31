@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for the /getlogs log viewer helpers and openeoConfigClass.logget(limit=)."""
 
-import os, sqlite3, subprocess, sys, unittest
+import os, re, sqlite3, subprocess, sys, unittest
 from threading import Lock
 from unittest import mock
 
@@ -104,16 +104,60 @@ class WifiLogTests(unittest.TestCase):
         self.assertTrue(out.endswith("\n"))
         self.assertEqual(logviewer.filter_wifi_lines(REQ, 10), "")
 
-    def test_read_wifi_log_units_and_error_passthrough(self):
-        completed = subprocess.CompletedProcess([], 0, stdout=f"{REQ}\n{WD}\n", stderr="")
+    def test_read_wifi_log_asks_journalctl_for_newest_events_only(self):
+        # journalctl filters with --grep and reads newest-first (-r), so it stops after n
+        # matches instead of formatting the whole journal (16.8 s on a Pi Zero W)
+        older = f"{PFX} openeo-wifi-watchdog[1]: RECONNECT reason=old rc=0"
+        newest_first = f"{WD}\n{REQ}\n{older}\n"
+        completed = subprocess.CompletedProcess([], 0, stdout=newest_first, stderr="")
         with mock.patch("lib.logviewer.subprocess.run", return_value=completed) as run:
-            self.assertEqual(logviewer.read_wifi_log(100), f"{WD}\n")
+            out = logviewer.read_wifi_log(100)
+        self.assertEqual(out, f"{older}\n{WD}\n")      # oldest first; REQ still dropped by the allowlist
         cmd = run.call_args[0][0]
         self.assertEqual(cmd[:7], ["journalctl", "-u", "openeo_wifi_watchdog", "-u", "openeo_portal", "-u", "wpa_supplicant"])
-        self.assertEqual(cmd[cmd.index("-n") + 1], "20000")
-        failed = subprocess.CompletedProcess([], 1, stdout="", stderr="boom")
-        with mock.patch("lib.logviewer.subprocess.run", return_value=failed):
+        self.assertEqual(cmd[cmd.index("--grep") + 1], logviewer.WIFI_GREP)
+        self.assertIn("-r", cmd)
+        self.assertEqual(cmd[cmd.index("-n") + 1], "100")
+        self.assertNotIn("shell", run.call_args[1])
+
+    def test_read_wifi_log_caps_lines(self):
+        # 5000 matches took 9.2 s on a busy Pi Zero W; cap the Wi-Fi tab well under the timeout
+        completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with mock.patch("lib.logviewer.subprocess.run", return_value=completed) as run:
+            logviewer.read_wifi_log(5000)
+        cmd = run.call_args[0][0]
+        self.assertEqual(cmd[cmd.index("-n") + 1], str(logviewer.WIFI_MAX_LINES))
+        self.assertEqual(logviewer.WIFI_MAX_LINES, 1000)
+
+    def test_read_wifi_log_no_matches_is_empty(self):
+        # journalctl --grep exits 1 with nothing on stderr when no entry matches
+        nomatch = subprocess.CompletedProcess([], 1, stdout="-- No entries --\n", stderr="")
+        with mock.patch("lib.logviewer.subprocess.run", return_value=nomatch):
+            self.assertEqual(logviewer.read_wifi_log(100), "")
+
+    def test_read_wifi_log_errors_pass_through(self):
+        for failed in (subprocess.CompletedProcess([], 1, stdout="", stderr="boom"),
+                       subprocess.CompletedProcess([], 2, stdout="", stderr="")):
+            with mock.patch("lib.logviewer.subprocess.run", return_value=failed):
+                self.assertTrue(logviewer.read_wifi_log(100).startswith("Error:"))
+        with mock.patch("lib.logviewer.subprocess.run",
+                        side_effect=subprocess.TimeoutExpired("journalctl", 10)):
             self.assertTrue(logviewer.read_wifi_log(100).startswith("Error:"))
+
+    def test_wifi_grep_matches_the_allowlist(self):
+        # The journalctl pattern only narrows the read; the Python allowlist stays the gate.
+        # Every message the allowlist accepts must also match the pattern, or it would vanish.
+        grep = re.compile(logviewer.WIFI_GREP)
+        for line in (WD, WPA, f"{PFX} portal.py[5]: [STARTUP] Network startup",
+                     f"{PFX} portal.py[5]: PIN bssid=X signal=60",
+                     f"{PFX} portal.py[5]: PIN_REJECTED bssid=X source=setup",
+                     f"{PFX} openeo-wifi-watchdog[1]: ERROR OSError: x",
+                     f"{PFX} openeo-wifi-watchdog[1]: REPIN_GIVEUP rejections=3"):
+            message = line.split(": ", 1)[1]
+            self.assertTrue(logviewer.is_wifi_event(line), line)
+            self.assertTrue(grep.search(message), message)
+        for line in (REQ, SNEAKY):
+            self.assertFalse(grep.search(line.split(": ", 1)[1]), line)
 
 
 class LoggetLimitTests(unittest.TestCase):
