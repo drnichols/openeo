@@ -329,3 +329,67 @@ def test_link_state_nm_down_wins():
 
 def test_norm_bssid():
     assert norm_bssid(" 02:ec:da:fd:20:a6\n") == "02:EC:DA:FD:20:A6" and norm_bssid(None) == ""
+
+
+# =========================
+# wpa_supplicant journal (§4.2)
+# =========================
+
+import json
+from wifi_pinning import parse_wpa_journal, read_wpa_events, WpaEvent
+
+
+def jline(mono_s, msg, boot="b1", cursor="c"):
+    return json.dumps({"__CURSOR": cursor, "__MONOTONIC_TIMESTAMP": str(int(mono_s * 1e6)),
+                       "_BOOT_ID": boot, "MESSAGE": msg})
+
+
+def test_parse_wpa_journal_drops_auth_and_cursor():
+    out = "\n".join([
+        jline(100, "wlan0: CTRL-EVENT-DISCONNECTED bssid=02:ec:da:fd:20:a6 reason=0 locally_generated=1", cursor="c1"),
+        jline(101, "wlan0: CTRL-EVENT-ASSOC-REJECT bssid=02:ec:da:fd:20:a6 status_code=16", cursor="c2"),
+        jline(102, 'wlan0: CTRL-EVENT-SSID-TEMP-DISABLED id=0 ssid="x" auth_failures=1 reason=WRONG_KEY', cursor="c3"),
+        jline(103, "wlan0: CTRL-EVENT-DISCONNECTED bssid=aa:aa:aa:aa:aa:aa reason=3", boot="old", cursor="c4"),
+        "{not json"])
+    events, cursor = parse_wpa_journal(out, boot_id="b1")
+    assert events == [WpaEvent("drop", 100.0, "02:EC:DA:FD:20:A6"), WpaEvent("auth_fail", 102.0)]
+    assert cursor == "c4"
+
+
+def test_parse_wpa_journal_skips_byte_array_message():
+    assert parse_wpa_journal(json.dumps({"__CURSOR": "c", "__MONOTONIC_TIMESTAMP": "1", "MESSAGE": [104, 105]}))[0] == []
+
+
+def test_parse_wpa_journal_skips_missing_timestamp_and_no_lines_gives_no_cursor():
+    line = json.dumps({"__CURSOR": "c", "MESSAGE": "wlan0: CTRL-EVENT-DISCONNECTED bssid=02:ec:da:fd:20:a6"})
+    assert parse_wpa_journal(line) == ([], "c")
+    assert parse_wpa_journal("") == ([], None)
+
+
+DISC = "wlan0: CTRL-EVENT-DISCONNECTED bssid=02:ec:da:fd:20:a6 reason=3"
+JQ = ("journalctl",)
+
+
+def test_read_wpa_events_uses_cursor():
+    run = FakeRunner([(JQ, ok(jline(5, DISC, cursor="c2")))])
+    events, cursor = read_wpa_events(run, "c1", "b1")
+    assert len(run.calls) == 1 and "--after-cursor" in run.calls[0] and "c1" in run.calls[0]
+    assert events == [WpaEvent("drop", 5.0, "02:EC:DA:FD:20:A6")] and cursor == "c2"
+
+
+def test_read_wpa_events_no_cursor_reads_window():
+    run = FakeRunner([(JQ, ok(jline(5, DISC, cursor="c2")))])
+    events, cursor = read_wpa_events(run, None, "b1")
+    assert "--since" in run.calls[0] and "-600s" in run.calls[0] and "--after-cursor" not in run.calls[0]
+    assert cursor == "c2" and len(events) == 1
+
+
+def test_read_wpa_events_bad_cursor_falls_back_to_window():
+    run = FakeRunner([(JQ, [fail(1), ok(jline(5, DISC, cursor="c2"))])])
+    events, cursor = read_wpa_events(run, "stale", "b1")
+    assert "--after-cursor" in run.calls[0] and "--since" in run.calls[1]
+    assert len(events) == 1 and cursor == "c2"
+
+
+def test_read_wpa_events_empty_keeps_cursor():
+    assert read_wpa_events(FakeRunner([(JQ, ok(""))]), "c1", "b1") == ([], "c1")

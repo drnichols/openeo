@@ -33,6 +33,9 @@ def default_state():
         "health_failures": 0,
         "repin_rejections": 0,
         "profile_uuid": None,
+        "journal_cursor": None,
+        "drops": [],            # [at, bssid] pairs, monotonic seconds
+        "last_auth_fail": None,
     }
 
 
@@ -60,6 +63,25 @@ def _unpin(state, now, bssid, reason, **extra):
     return [Action("CLEAR_PIN", {}),
             _log("UNPIN", bssid=bssid, reason=reason, **extra, roam_count=state["roam_count"]),
             _con_up("failover" if reason == "down" else reason)]
+
+
+def record_events(state, events, now, *, lock_age):
+    """Fold journal events into the state. Pure: returns a new state."""
+    state = dict(state)
+    state["drops"] = [list(d) for d in state["drops"] if d[0] >= now - wp.DROPS_KEEP]
+    if lock_age is not None and lock_age < wp.LOCK_STALE:
+        return state    # the portal is setting up Wi-Fi; its disconnects are not flaps
+    last_reconnect = state["last_reconnect"]
+    for event in events:
+        if event.kind == "auth_fail":
+            state["last_auth_fail"] = max(state["last_auth_fail"] or event.at, event.at)
+            continue
+        if last_reconnect is not None and 0 <= event.at - last_reconnect <= wp.SELF_RECONNECT_GRACE:
+            continue    # our own reconnect, not a drop
+        drop = [event.at, wp.norm_bssid(event.bssid)]
+        if drop not in state["drops"]:
+            state["drops"].append(drop)
+    return state
 
 
 def decide(state, now, *, link_up, pinned, profile_exists, lock_age):
@@ -275,6 +297,9 @@ def run_once(run, now, now_wall, state_path=wp.STATE_FILE, lock_path=wp.SETUP_LO
         uuid = wp.profile_uuid(run)
         if uuid and uuid != state["profile_uuid"]:
             state = default_state() | {"profile_uuid": uuid}
+        events, state["journal_cursor"] = wp.read_wpa_events(run, state["journal_cursor"], wp.boot_id())
+        lock = lock_age(lock_path, now_wall)
+        state = record_events(state, events, now, lock_age=lock)
         pinned = wp.get_pin(run)
         executor = Executor(run, now, now_wall, lock_path, sleep, pinned)
         link = wp.link_state(run)
@@ -282,7 +307,7 @@ def run_once(run, now, now_wall, state_path=wp.STATE_FILE, lock_path=wp.SETUP_LO
                                 link_up=link.up,
                                 pinned=pinned,
                                 profile_exists=wp.profile_exists(run),
-                                lock_age=lock_age(lock_path, now_wall))
+                                lock_age=lock)
         save_state(state_path, state)
         try:
             state = executor.execute(actions, state)

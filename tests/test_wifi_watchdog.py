@@ -350,3 +350,38 @@ def test_run_once_sees_drop_from_iw_while_nm_still_up(tmp_path):
     wd.run_once(run, 0, 1e9, st, lock)
     lines = wd.run_once(run, 60, 1e9 + 60, st, lock)
     assert lines[0] == "UNPIN bssid=AA:BB:CC:DD:EE:01 reason=down down_for=60 roam_count=1"
+
+
+# =========================
+# Journal drops (§4.2)
+# =========================
+
+from wifi_pinning import WpaEvent
+from test_wifi_pinning import jline
+
+
+def test_record_events_grace_lock_prune_dedupe():
+    s = wd.default_state() | {"last_reconnect": 1000, "drops": [[10, P]]}
+    ev = [WpaEvent("drop", 1010, P), WpaEvent("drop", 1031, P), WpaEvent("auth_fail", 1040)]
+    s2 = wd.record_events(s, ev, 4000, lock_age=None)
+    assert s2["drops"] == [[1031, P]]               # 1010 inside 30 s grace; 10 pruned (> 1 h old)
+    assert s2["last_auth_fail"] == 1040
+    assert s["drops"] == [[10, P]]                   # input not mutated
+    assert wd.record_events(s2, ev, 4000, lock_age=None)["drops"] == [[1031, P]]   # re-read: no duplicates
+    assert wd.record_events(wd.default_state(), ev, 4000, lock_age=10)["drops"] == []  # setup lock fresh
+
+
+def test_record_events_normalises_bssid_and_keeps_latest_auth_fail():
+    s = wd.default_state() | {"last_auth_fail": 2000}
+    s2 = wd.record_events(s, [WpaEvent("drop", 50, P.lower()), WpaEvent("auth_fail", 1500)], 100, lock_age=None)
+    assert s2["drops"] == [[50, P]] and s2["last_auth_fail"] == 2000
+
+
+def test_run_once_saves_journal_cursor(tmp_path, monkeypatch):
+    monkeypatch.setattr(wd.wp, "boot_id", lambda: "b1")
+    st, lock = tmp_path / "s.json", tmp_path / "lock"
+    disc = f"wlan0: CTRL-EVENT-DISCONNECTED bssid={P.lower()} reason=3"
+    run = FakeRunner([UP, PIN, (("journalctl",), ok(jline(5, disc, cursor="k9")))])
+    wd.run_once(run, 100, 1e9, st, lock)
+    saved = wd.load_state(st)
+    assert saved["journal_cursor"] == "k9" and saved["drops"] == [[5.0, P]]

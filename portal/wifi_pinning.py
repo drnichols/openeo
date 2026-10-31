@@ -5,6 +5,7 @@ list and returning a subprocess.CompletedProcess, which never raises. Tests inje
 fake one, so nothing here needs real hardware.
 """
 
+import json
 import math
 import re
 import statistics
@@ -31,6 +32,9 @@ REPIN_STABLE = 600
 REPIN_RETRY = 3600
 REPIN_MAX_REJECTIONS = 3
 LOCK_STALE = 300
+FLAP_WINDOW = 600
+SELF_RECONNECT_GRACE = 30
+DROPS_KEEP = 3600
 SETUP_LOCK = "/run/openeo-wifi-setup.lock"
 STATE_FILE = "/run/openeo-wifi-watchdog/state.json"
 CONNECTION_NAME = "custom-wifi"
@@ -292,3 +296,64 @@ def link_up(run):
 def profile_ssid(run):
     result = run(['nmcli', '-g', '802-11-wireless.ssid', 'connection', 'show', CONNECTION_NAME])
     return unescape(result.stdout.strip()) if result.returncode == 0 else ""
+
+
+# =========================
+# wpa_supplicant journal (drop source, spec §4.2)
+# =========================
+
+DROP_RE = re.compile(r'^wlan0: CTRL-EVENT-DISCONNECTED bssid=([0-9A-Fa-f:]{17})')
+
+
+@dataclass
+class WpaEvent:
+    kind: str              # "drop" or "auth_fail"
+    at: float              # monotonic seconds
+    bssid: str | None = None
+
+
+def parse_wpa_journal(stdout, boot_id=""):
+    """Parse `journalctl -o json` output (one object per line) into events and the last cursor."""
+    events, cursor = [], None
+    for line in stdout.splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        cursor = entry.get("__CURSOR", cursor)
+        if boot_id and entry.get("_BOOT_ID") != boot_id:
+            continue
+        message = entry.get("MESSAGE")
+        if not isinstance(message, str):
+            continue
+        try:
+            at = int(entry["__MONOTONIC_TIMESTAMP"]) / 1e6
+        except (KeyError, TypeError, ValueError):
+            continue
+        m = DROP_RE.match(message)
+        if m:
+            events.append(WpaEvent("drop", at, norm_bssid(m.group(1))))
+        elif 'reason=WRONG_KEY' in message or 'pre-shared key may be incorrect' in message:
+            events.append(WpaEvent("auth_fail", at))
+    return events, cursor
+
+
+def read_wpa_events(run, cursor, boot_id):
+    """New wpa_supplicant events since the cursor, or the last FLAP_WINDOW seconds without one."""
+    base = ['journalctl', '-t', 'wpa_supplicant', '-b']
+    tail = ['-o', 'json', '--no-pager']
+    result = run(base + ['--after-cursor', cursor] + tail) if cursor else None
+    if result is None or result.returncode != 0:
+        result = run(base + ['--since', f'-{FLAP_WINDOW}s'] + tail)
+    events, new_cursor = parse_wpa_journal(result.stdout, boot_id)
+    return events, new_cursor or cursor
+
+
+def boot_id():
+    try:
+        with open('/proc/sys/kernel/random/boot_id') as f:
+            return f.read().strip().replace('-', '')
+    except OSError:
+        return ""
