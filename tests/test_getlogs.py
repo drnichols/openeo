@@ -53,6 +53,51 @@ class ReadJournalTests(unittest.TestCase):
             self.assertEqual(logviewer.read_journal(100), "Error: No journal files were found.")
 
 
+PFX = "2026-10-31T15:30:57+0000 openeo-test"
+WD = PFX + " openeo-wifi-watchdog[812]: UNPIN bssid=02:EC:DA:FD:20:A6 reason=flapping drops=3 window=600 roam_count=1"
+WPA = PFX + " wpa_supplicant[402]: wlan0: CTRL-EVENT-DISCONNECTED bssid=02:ec:da:fd:20:a6 reason=0"
+REQ = PFX + ' portal.py[512]: 192.168.4.2 - "GET /api/set_wifi?ssid=x&password=hunter22 HTTP/1.1" 200 -'
+SNEAKY = PFX + ' portal.py[512]: 192.168.4.2 - "GET /api/set_wifi?ssid=PIN&password=hunter22 HTTP/1.1" 200 -'
+
+
+class WifiLogTests(unittest.TestCase):
+    def test_wifi_source_parsed(self):
+        self.assertEqual(logviewer.parse_log_query("/getlogs?source=wifi")[0], "wifi")
+
+    def test_allowlist(self):
+        for l in (WD, WPA, PFX + " portal.py[5]: [STARTUP] Network startup",
+                  PFX + " openeo-wifi-watchdog[1]: ERROR OSError: x",
+                  PFX + " openeo-wifi-watchdog[1]: RECONNECT reason=weak rc=0"):
+            self.assertTrue(logviewer.is_wifi_event(l), l)
+        for l in (REQ, SNEAKY, "-- Boot 1234 --", PFX + " portal.py[5]: response=200 result={}",
+                  PFX + " wpa_supplicant[1]: wlan0: WPA: Key negotiation completed",
+                  PFX + " openeo-wifi-watchdog[1]: PINNED x", ""):
+            self.assertFalse(logviewer.is_wifi_event(l), l)
+
+    def test_wifi_filter_drops_password_request_line(self):
+        out = logviewer.filter_wifi_lines("\n".join([REQ, WD, SNEAKY, WPA]), 500)
+        self.assertNotIn("password", out)
+        self.assertEqual(out, f"{WD}\n{WPA}\n")
+
+    def test_filter_keeps_last_n(self):
+        text = "\n".join(f"{PFX} openeo-wifi-watchdog[1]: RECONNECT reason=r{i} rc=0" for i in range(5))
+        out = logviewer.filter_wifi_lines(text, 2)
+        self.assertEqual(out.splitlines(), [f"{PFX} openeo-wifi-watchdog[1]: RECONNECT reason=r{i} rc=0" for i in (3, 4)])
+        self.assertTrue(out.endswith("\n"))
+        self.assertEqual(logviewer.filter_wifi_lines(REQ, 10), "")
+
+    def test_read_wifi_log_units_and_error_passthrough(self):
+        completed = subprocess.CompletedProcess([], 0, stdout=f"{REQ}\n{WD}\n", stderr="")
+        with mock.patch("lib.logviewer.subprocess.run", return_value=completed) as run:
+            self.assertEqual(logviewer.read_wifi_log(100), f"{WD}\n")
+        cmd = run.call_args[0][0]
+        self.assertEqual(cmd[:7], ["journalctl", "-u", "openeo_wifi_watchdog", "-u", "openeo_portal", "-u", "wpa_supplicant"])
+        self.assertEqual(cmd[cmd.index("-n") + 1], "20000")
+        failed = subprocess.CompletedProcess([], 1, stdout="", stderr="boom")
+        with mock.patch("lib.logviewer.subprocess.run", return_value=failed):
+            self.assertTrue(logviewer.read_wifi_log(100).startswith("Error:"))
+
+
 class LoggetLimitTests(unittest.TestCase):
     def setUp(self):
         # Bypass __init__, which creates the database under /home/pi

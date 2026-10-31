@@ -6,6 +6,7 @@ import { useToastContext } from "./openeo-Toast";
 const SOURCES = [
   { id: "app",     label: "App Events" },
   { id: "journal", label: "Service Journal" },
+  { id: "wifi",    label: "Wi-Fi" },
 ];
 const LINE_OPTIONS = [200, 500, 1000, 5000];
 const REFRESH_MS = 5000;
