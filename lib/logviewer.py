@@ -90,8 +90,12 @@ def is_wifi_event(line):
 
 
 def filter_wifi_lines(text, lines):
-    """Keeps the Wi-Fi event lines, then the last n of them, as newline-terminated text."""
-    kept = [line for line in text.splitlines() if is_wifi_event(line)][-int(lines):]
+    r"""
+    Keeps the Wi-Fi event lines, then the last n of them, as newline-terminated text.
+    Splits on newline only: journalctl ends each entry with one, and splitlines() would
+    also break on \r, \x85 or \u2028 inside a message and judge the pieces on their own.
+    """
+    kept = [line for line in text.split("\n") if line and is_wifi_event(line)][-int(lines):]
     return "\n".join(kept) + "\n" if kept else ""
 
 

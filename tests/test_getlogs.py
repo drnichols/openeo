@@ -79,6 +79,24 @@ class WifiLogTests(unittest.TestCase):
         self.assertNotIn("password", out)
         self.assertEqual(out, f"{WD}\n{WPA}\n")
 
+    def test_wifi_filter_rejects_lookalikes(self):
+        for l in (PFX + ' python3[512]: 192.168.4.2 - "GET /api/set_wifi?ssid=My PIN&password=x HTTP/1.1" 200 -',
+                  PFX + ' python3[512]: 192.168.4.2 - "GET /api/set_wifi?ssid=a&password=x HTTP/1.1" 500 ERROR',
+                  PFX + " openeo-wifi-watchdog[1]:  PIN x",
+                  "    UNPIN bssid=02:EC:DA:FD:20:A6 reason=flapping"):
+            self.assertEqual(logviewer.filter_wifi_lines(l, 10), "", l)
+
+    def test_wifi_filter_does_not_split_a_line_on_other_separators(self):
+        # splitlines() would break these inside one journal line and judge the tail on its own
+        event = PFX + " openeo-wifi-watchdog[1]: UNPIN bssid=02:EC:DA:FD:20:A6 reason=flapping"
+        for sep in ("\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            line = PFX + ' python3[512]: 192.168.4.2 - "GET /api/set_wifi?ssid=a&password=x' + sep + event
+            self.assertEqual(logviewer.filter_wifi_lines(f"{line}\n{WD}\n", 10), f"{WD}\n", repr(sep))
+
+    def test_wifi_filter_accepts_identifier_without_pid(self):
+        line = PFX + " openeo-wifi-watchdog: UNPIN bssid=02:EC:DA:FD:20:A6 reason=flapping"
+        self.assertEqual(logviewer.filter_wifi_lines(line, 10), f"{line}\n")
+
     def test_filter_keeps_last_n(self):
         text = "\n".join(f"{PFX} openeo-wifi-watchdog[1]: RECONNECT reason=r{i} rc=0" for i in range(5))
         out = logviewer.filter_wifi_lines(text, 2)
