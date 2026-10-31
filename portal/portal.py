@@ -17,6 +17,11 @@ from urllib.parse import parse_qs
 import wifi_pinning
 
 
+def redact(text):
+    """Mask Wi-Fi passwords in a log line (the setup UI sends them in the query string)."""
+    return re.sub(r'(password=)[^&\s"]*', r"\1***", text, flags=re.IGNORECASE)
+
+
 PORT = 81
 DEFAULT_TIMEOUT = 30*60
 CONNECTION_NAME = "custom-wifi"
@@ -276,7 +281,7 @@ def setup_wifi_connection(ssid, password, run=None, sleep=time.sleep):
     BSSID, and keep the pin only if the connection and the gateway health check succeed.
     Returns (success, message, pinned_bssid, pinned_signal)."""
     if DRYRUN:
-        print(f"setup_wifi_connection {ssid} {password} - dryrun - not executed\n")
+        print(f"setup_wifi_connection {ssid} - dryrun - not executed\n")
         return False, "dryrun - not executed", None, None
 
     if run is None:
@@ -325,7 +330,7 @@ def setup_wifi_connection(ssid, password, run=None, sleep=time.sleep):
         if pinned and result.returncode != 0:
             # The pinned node may have rejected us. Never leave the profile pinned to it
             print(wifi_pinning.format_event("PIN_REJECTED", {
-                "bssid": pinned, "signal": selection.signal, "source": "setup"}))
+                "bssid": pinned, "signal": selection.signal, "source": "setup"}), flush=True)
             wifi_pinning.clear_pin(run)
             pinned = None
             result = connect()
@@ -335,10 +340,10 @@ def setup_wifi_connection(ssid, password, run=None, sleep=time.sleep):
             if health.passed:
                 print(wifi_pinning.format_event("PIN", {
                     "bssid": pinned, "signal": selection.signal, "runner_up": selection.runner_up,
-                    "samples": selection.samples, "loss": loss, **wifi_pinning.station_info(run)}))
+                    "samples": selection.samples, "loss": loss, **wifi_pinning.station_info(run)}), flush=True)
             else:
                 print(wifi_pinning.format_event("PIN_REJECTED", {
-                    "bssid": pinned, "signal": selection.signal, "loss": loss, "source": "setup"}))
+                    "bssid": pinned, "signal": selection.signal, "loss": loss, "source": "setup"}), flush=True)
                 wifi_pinning.clear_pin(run)
                 pinned = None
                 result = connect()
@@ -433,8 +438,9 @@ class APIServerHandler(http.server.SimpleHTTPRequestHandler):
             self.send_error(500, str(e))
 
     def log_message(self, fmt, *args):
-        sys.stdout.write("%s - %s\n" %
-                         (self.client_address[0], fmt % args))
+        sys.stdout.write(redact("%s - %s\n" %
+                                (self.client_address[0], fmt % args)))
+        sys.stdout.flush()
 
 
 # =========================

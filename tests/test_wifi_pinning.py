@@ -276,3 +276,18 @@ def test_setup_refreshes_lock_before_every_connect(monkeypatch):
     ups = [i for i, c in enumerate(run.calls) if tuple(c[:4]) == NM_UP]
     assert len(ups) == 2
     assert all(run.calls[i - 1] == list(TOUCH) for i in ups)
+
+
+def test_redact_password_query():
+    assert portal.redact('"GET /api/set_wifi?ssid=x&password=secret HTTP/1.1" 200') == \
+        '"GET /api/set_wifi?ssid=x&password=*** HTTP/1.1" 200'
+    assert portal.redact("/api/set_wifi?password=a%26b&ssid=y") == "/api/set_wifi?password=***&ssid=y"
+    assert portal.redact("GET /api/get_wifi") == "GET /api/get_wifi"
+
+
+def test_log_message_redacts(capsys):
+    handler = object.__new__(portal.APIServerHandler)
+    handler.client_address = ("192.168.4.2", 5000)
+    handler.log_message('"%s" %s %s', "GET /api/set_wifi?ssid=x&password=hunter22 HTTP/1.1", "200", "-")
+    out = capsys.readouterr().out
+    assert "hunter22" not in out and "password=***" in out
