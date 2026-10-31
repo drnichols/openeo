@@ -87,6 +87,37 @@ def test_select_tie_is_deterministic():
     assert select_bssid([s((B, 70), (A, 70))] * 3, "Mesh").bssid == A
 
 
+C = "CC:CC:CC:CC:CC:03"
+
+
+def test_select_excluded_best_picks_next():
+    samples = [s((A, 80), (B, 70), (C, 60))] * 3
+    sel = select_bssid(samples, "Mesh", exclude={A})
+    assert (sel.bssid, sel.signal, sel.runner_up, sel.reason) == (B, 70, 80, "pin")
+
+
+def test_select_multi_ap_test_uses_full_scan():
+    samples = [s((A, 80), (B, 70))] * 3
+    assert select_bssid(samples, "Mesh", exclude={A}).bssid == B     # one left, still multi-AP
+
+
+def test_select_all_excluded():
+    samples = [s((A, 80), (B, 70))] * 3
+    sel = select_bssid(samples, "Mesh", exclude={A, B})
+    assert (sel.bssid, sel.samples, sel.reason) == (None, 3, "excluded")
+
+
+def test_select_exclude_is_case_insensitive():
+    samples = [s(("AA:BB:CC:DD:EE:01", 80), ("AA:BB:CC:DD:EE:02", 70))] * 3
+    assert select_bssid(samples, "Mesh", exclude={"aa:bb:cc:dd:ee:01"}).bssid == "AA:BB:CC:DD:EE:02"
+
+
+def test_select_weak_test_applies_to_remaining_best():
+    samples = [s((A, 80), (B, 20))] * 3
+    sel = select_bssid(samples, "Mesh", exclude={A})
+    assert (sel.reason, sel.signal, sel.runner_up) == ("weak", 20, 80)
+
+
 def test_scan_skips_failed_samples_and_falls_back_to_cache():
     line = "AA\\:AA\\:AA\\:AA\\:AA\\:01:Mesh:70\nBB\\:BB\\:BB\\:BB\\:BB\\:02:Mesh:40\nbad line\n"
     run = FakeRunner([(SCAN + ("yes",), fail()), (SCAN + ("no",), ok(line))])

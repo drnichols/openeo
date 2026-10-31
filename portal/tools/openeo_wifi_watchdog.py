@@ -36,6 +36,10 @@ def default_state():
         "journal_cursor": None,
         "drops": [],            # [at, bssid] pairs, monotonic seconds
         "last_auth_fail": None,
+        "excluded_bssids": [],  # never re-pinned until a new setup or a reboot (/run)
+        "last_unpin_reason": None,
+        "last_unpin_at": None,
+        "last_flap": None,      # {"bssid", "drops", "span"} of the last flapping unpin
     }
 
 
@@ -52,8 +56,18 @@ def _since(now, then):
     return None if then is None else now - then
 
 
+def _exclude(state, bssid):
+    """Keep the watchdog from re-pinning this node."""
+    bssid = wp.norm_bssid(bssid)
+    if bssid and bssid not in state["excluded_bssids"]:
+        state["excluded_bssids"] = state["excluded_bssids"] + [bssid]
+
+
 def _unpin(state, now, bssid, reason, **extra):
-    """Clear the pin and reconnect by SSID (rules 1 and 3)."""
+    """Clear the pin, exclude the node from re-pinning and reconnect by SSID (rules 1a, 1 and 3)."""
+    _exclude(state, bssid)
+    state["last_unpin_reason"] = reason
+    state["last_unpin_at"] = now
     state["unpinned_by_watchdog"] = True
     state["roam_count"] += 1
     state["last_reconnect"] = now
@@ -103,6 +117,16 @@ def decide(state, now, *, link_up, pinned, profile_exists, lock_age):
     down_for = _since(now, state["down_since"])
     up_for = _since(now, state["up_since"])
 
+    # Rule 1a: flapping. The pinned node keeps dropping us; let NM roam by SSID instead
+    if pinned:
+        pin = wp.norm_bssid(pinned)
+        recent = [at for at, bssid in state["drops"] if bssid == pin and now - at <= wp.FLAP_WINDOW]
+        if len(recent) >= wp.FLAP_DROPS:
+            actions = _unpin(state, now, pinned, "flapping", drops=len(recent), window=wp.FLAP_WINDOW)
+            state["drops"] = []
+            state["last_flap"] = {"bssid": pin, "drops": len(recent), "span": int(max(recent) - min(recent))}
+            return actions, state
+
     # Rule 1: failover. A pinned node that has gone away must not strand the charger
     if not link_up and pinned and down_for >= wp.FAILOVER_AFTER:
         return _unpin(state, now, pinned, "down", down_for=int(down_for)), state
@@ -123,15 +147,19 @@ def decide(state, now, *, link_up, pinned, profile_exists, lock_age):
     # Rule 4: re-pin once the link has been stable after a watchdog unpin
     if link_up and not pinned and state["unpinned_by_watchdog"] and up_for >= wp.REPIN_STABLE:
         since_attempt = _since(now, state["last_repin_attempt"])
-        if since_attempt is None or since_attempt >= wp.REPIN_RETRY:
+        # A node that flapped gets an hour's cool-off before any re-pin
+        cooled_off = (state["last_unpin_reason"] != "flapping"
+                      or now - state["last_unpin_at"] >= wp.FLAP_COOLOFF)
+        if cooled_off and (since_attempt is None or since_attempt >= wp.REPIN_RETRY):
             state["last_repin_attempt"] = now
             return [Action("REPIN_SCAN", {})], state
 
     return [], state
 
 
-def after_health(state, now, source, passed):
-    """Act on a health check result. source is 'periodic' (rule 3) or 'repin' (rule 4)."""
+def after_health(state, now, source, passed, bssid=None):
+    """Act on a health check result. source is 'periodic' (rule 3) or 'repin' (rule 4);
+    bssid is the node checked: the current pin, or the one just pinned for a re-pin."""
     state = dict(state)
 
     if source == "periodic":
@@ -142,7 +170,7 @@ def after_health(state, now, source, passed):
         state["health_failures"] += 1
         actions = [_log("HEALTH_FAIL", failures=state["health_failures"])]
         if state["health_failures"] >= wp.HEALTH_FAILS_TO_UNPIN:
-            actions += _unpin(state, now, None, "unhealthy")
+            actions += _unpin(state, now, bssid, "unhealthy")
         return actions, state
 
     # Re-pin: the script has already set the pin and re-activated
@@ -156,6 +184,7 @@ def after_health(state, now, source, passed):
         return [_log("REPIN")], state
 
     state["repin_rejections"] += 1
+    _exclude(state, bssid)
     actions = [Action("CLEAR_PIN", {}), _log("PIN_REJECTED", source="repin"), _con_up("rejected")]
     if state["repin_rejections"] < wp.REPIN_MAX_REJECTIONS:
         state["unpinned_by_watchdog"] = True
@@ -263,14 +292,15 @@ class Executor:
             elif action.kind == "CHECK_HEALTH":
                 result = wp.health_check(self.run)
                 self.ctx["loss"] = _loss(result)
-                more, state = after_health(state, self.now, "periodic", result.passed)
+                more, state = after_health(state, self.now, "periodic", result.passed, self.ctx["bssid"])
                 state = self.execute(more, state)
             elif action.kind == "REPIN_SCAN":
                 state = self.repin(state)
         return state
 
     def repin(self, state):
-        selection = wp.choose_pin(self.run, wp.profile_ssid(self.run), self.sleep)
+        selection = wp.choose_pin(self.run, wp.profile_ssid(self.run), self.sleep,
+                                  exclude=frozenset(state["excluded_bssids"]))
         if not selection.bssid:
             return state    # stay unpinned, try again in an hour
         self.check_lock()
@@ -284,7 +314,7 @@ class Executor:
         self.ctx.update(bssid=selection.bssid, signal=selection.signal, loss=_loss(result))
         if result.passed:
             self.ctx["station"] = wp.station_info(self.run)
-        more, state = after_health(state, self.now, "repin", result.passed)
+        more, state = after_health(state, self.now, "repin", result.passed, self.ctx["bssid"])
         return self.execute(more, state)
 
 

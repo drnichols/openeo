@@ -257,7 +257,7 @@ def test_run_once_repin_passes_and_logs_repin(tmp_path, monkeypatch):
     st, lock = tmp_path / "s.json", tmp_path / "lock"
     wd.save_state(st, wd.default_state() | {"unpinned_by_watchdog": True, "up_since": 0})
     sel = wd.wp.Selection("AA:BB:CC:DD:EE:02", 74, 60, 3, "pin")
-    monkeypatch.setattr(wd.wp, "choose_pin", lambda run, ssid, sleep=None: sel)
+    monkeypatch.setattr(wd.wp, "choose_pin", lambda run, ssid, sleep=None, exclude=None: sel)
     monkeypatch.setattr(wd.wp, "health_check", lambda run: wd.wp.HealthResult(True, 0, False))
     monkeypatch.setattr(wd.wp, "station_info", lambda run: {"rssi": -58})
     run = FakeRunner([UP, NOPIN])
@@ -272,7 +272,7 @@ def test_run_once_repin_rejected_runs_clear_and_reconnect(tmp_path, monkeypatch)
     st, lock = tmp_path / "s.json", tmp_path / "lock"
     wd.save_state(st, wd.default_state() | {"unpinned_by_watchdog": True, "up_since": 0})
     sel = wd.wp.Selection("AA:BB:CC:DD:EE:02", 74, 60, 3, "pin")
-    monkeypatch.setattr(wd.wp, "choose_pin", lambda run, ssid, sleep=None: sel)
+    monkeypatch.setattr(wd.wp, "choose_pin", lambda run, ssid, sleep=None, exclude=None: sel)
     monkeypatch.setattr(wd.wp, "health_check", lambda run: wd.wp.HealthResult(False, 100, False))
     run = FakeRunner([UP, NOPIN])
     lines = wd.run_once(run, 600, 1e9, st, lock)
@@ -285,7 +285,7 @@ def test_run_once_repin_rejected_runs_clear_and_reconnect(tmp_path, monkeypatch)
 def test_run_once_repin_no_node_stays_unpinned(tmp_path, monkeypatch):
     st, lock = tmp_path / "s.json", tmp_path / "lock"
     wd.save_state(st, wd.default_state() | {"unpinned_by_watchdog": True, "up_since": 0})
-    monkeypatch.setattr(wd.wp, "choose_pin", lambda run, ssid, sleep=None: wd.wp.Selection(reason="single"))
+    monkeypatch.setattr(wd.wp, "choose_pin", lambda run, ssid, sleep=None, exclude=None: wd.wp.Selection(reason="single"))
     run = FakeRunner([UP, NOPIN])
     assert wd.run_once(run, 600, 1e9, st, lock) == []
     assert not any(is_con_up(c) for c in run.calls)
@@ -313,7 +313,7 @@ def test_run_once_repin_failed_activation_is_a_rejection(tmp_path, monkeypatch):
     st, lock = tmp_path / "s.json", tmp_path / "lock"
     wd.save_state(st, wd.default_state() | {"unpinned_by_watchdog": True, "up_since": 0})
     sel = wd.wp.Selection("AA:BB:CC:DD:EE:02", 74, 60, 3, "pin")
-    monkeypatch.setattr(wd.wp, "choose_pin", lambda run, ssid, sleep=None: sel)
+    monkeypatch.setattr(wd.wp, "choose_pin", lambda run, ssid, sleep=None, exclude=None: sel)
     monkeypatch.setattr(wd.wp, "health_check", lambda run: wd.wp.HealthResult(True, None, True))
     from conftest import fail
     run = FakeRunner([UP, NOPIN, (("nmcli", "connection", "up"), [fail(4), ok("")])])
@@ -385,3 +385,161 @@ def test_run_once_saves_journal_cursor(tmp_path, monkeypatch):
     wd.run_once(run, 100, 1e9, st, lock)
     saved = wd.load_state(st)
     assert saved["journal_cursor"] == "k9" and saved["drops"] == [[5.0, P]]
+
+
+# =========================
+# Flap rule 1a, exclusions and cool-off (§4.2, §4.3)
+# =========================
+
+def flap_step(state, now, drop_times, up=True, pinned=P):
+    state = state | {"drops": [[t, P] for t in drop_times]}
+    return step(state, now, up, pinned=pinned)
+
+
+def test_two_drops_no_action():
+    a, s = flap_step(default_state(), 150, [0, 100])
+    assert a == [] and len(s["drops"]) == 2
+
+
+def test_three_drops_unpin_flapping():
+    a, s = flap_step(default_state(), 300, [0, 100, 200])
+    assert kinds(a) == ["CLEAR_PIN", "LOG", "CON_UP"] and a[2].fields["reason"] == "flapping"
+    assert a[1].fields == {"event": "UNPIN", "bssid": P, "reason": "flapping", "drops": 3,
+                           "window": 600, "roam_count": 1}
+    assert s["excluded_bssids"] == [P] and s["drops"] == [] and s["last_unpin_reason"] == "flapping"
+    assert s["last_flap"] == {"bssid": P, "drops": 3, "span": 200}
+    assert s["last_unpin_at"] == 300
+
+
+def test_drops_outside_window_dont_count():
+    a, _ = flap_step(default_state(), 701, [0, 100, 200])
+    assert a == []
+
+
+def test_drops_for_other_bssid_dont_count():
+    other = "AA:BB:CC:DD:EE:02"
+    s = default_state() | {"drops": [[0, other], [100, other], [200, other]]}
+    a, _ = step(s, 300, True)
+    assert a == []
+
+
+def test_flap_rule_needs_pin():
+    a, _ = flap_step(default_state(), 300, [0, 100, 200], pinned="")
+    assert "UNPIN" not in events(a)
+
+
+def test_flap_rule_matches_pin_case_insensitively():
+    a, _ = flap_step(default_state(), 300, [0, 100, 200], pinned=P.lower())
+    assert events(a) == ["UNPIN"] and a[1].fields["reason"] == "flapping"
+
+
+def test_replay_2026_10_30_unpins_at_15_30_57():
+    # t=0 is 15:27:28 (first drop). Drops 15:27:28, 15:29:28, 15:30:13; runs at :57 past each minute.
+    # Journal BSSID is lower case; the pin is the nmcli upper-case form.
+    drops = [0, 120, 165]
+    runs = [29, 89, 149, 209]
+    s = default_state()
+    for run_at in runs:
+        new = [WpaEvent("drop", t, "02:ec:da:fd:20:a6") for t in drops if t <= run_at]
+        s = wd.record_events(s, new, run_at, lock_age=None)
+        a, s = step(s, run_at, True, pinned="02:EC:DA:FD:20:A6")
+        if run_at < 209:
+            assert "UNPIN" not in events(a)
+    assert events(a) == ["UNPIN"] and a[1].fields["reason"] == "flapping"
+    assert s["excluded_bssids"] == ["02:EC:DA:FD:20:A6"]
+
+
+def test_every_unpin_excludes():
+    s = default_state()
+    _, s = step(s, 0, False)
+    a, s = step(s, 60, False)
+    assert a[1].fields["reason"] == "down" and s["excluded_bssids"] == [P]
+    assert s["last_unpin_reason"] == "down" and s["last_unpin_at"] == 60
+
+    other = "AA:BB:CC:DD:EE:02"
+    s = default_state() | {"health_failures": 1, "excluded_bssids": [P]}
+    a, s = after_health(s, 100, "periodic", False, bssid=other.lower())
+    assert a[2].fields["reason"] == "unhealthy" and s["excluded_bssids"] == [P, other]
+    _, s = after_health(s | {"health_failures": 1}, 200, "periodic", False, bssid=P)
+    assert s["excluded_bssids"] == [P, other]      # no duplicates
+
+
+def test_repin_rejection_excludes():
+    B = "AA:BB:CC:DD:EE:02"
+    s = default_state() | {"unpinned_by_watchdog": True}
+    _, s = after_health(s, 3600, "repin", False, bssid=B)
+    assert B in s["excluded_bssids"]
+
+
+def test_flap_cooloff_holds_repin():
+    s = default_state() | {"unpinned_by_watchdog": True, "last_unpin_reason": "flapping",
+                           "last_unpin_at": 0, "up_since": 0}
+    assert step(s, 3599, True, pinned="")[0] == []
+    assert kinds(step(s, 3600, True, pinned="")[0]) == ["REPIN_SCAN"]
+
+
+def test_down_unpin_has_no_cooloff():
+    s = default_state() | {"unpinned_by_watchdog": True, "last_unpin_reason": "down",
+                           "last_unpin_at": 0, "up_since": 0}
+    assert kinds(step(s, 600, True, pinned="")[0]) == ["REPIN_SCAN"]
+
+
+def test_run_once_repin_passes_exclusions(tmp_path, monkeypatch):
+    st, lock = tmp_path / "s.json", tmp_path / "lock"
+    wd.save_state(st, wd.default_state() | {"unpinned_by_watchdog": True, "up_since": 0,
+                                            "excluded_bssids": [P]})
+    seen = {}
+
+    def fake_choose(run, ssid, sleep=None, exclude=None):
+        seen["exclude"] = exclude
+        return wd.wp.Selection(reason="excluded")
+
+    monkeypatch.setattr(wd.wp, "choose_pin", fake_choose)
+    wd.run_once(FakeRunner([UP, NOPIN]), 600, 1e9, st, lock)
+    assert seen["exclude"] == frozenset({P})
+
+
+def test_run_once_all_excluded_no_rejection(tmp_path, monkeypatch):
+    st, lock = tmp_path / "s.json", tmp_path / "lock"
+    wd.save_state(st, wd.default_state() | {"unpinned_by_watchdog": True, "up_since": 0,
+                                            "excluded_bssids": [P]})
+    monkeypatch.setattr(wd.wp, "choose_pin",
+                        lambda run, ssid, sleep=None, exclude=None: wd.wp.Selection(samples=3, reason="excluded"))
+    run = FakeRunner([UP, NOPIN])
+    assert wd.run_once(run, 600, 1e9, st, lock) == []
+    assert not any(is_con_up(c) for c in run.calls)
+    assert wd.load_state(st)["repin_rejections"] == 0
+
+
+def test_run_once_rejected_repin_excludes_selection(tmp_path, monkeypatch):
+    st, lock = tmp_path / "s.json", tmp_path / "lock"
+    wd.save_state(st, wd.default_state() | {"unpinned_by_watchdog": True, "up_since": 0})
+    sel = wd.wp.Selection("AA:BB:CC:DD:EE:02", 74, 60, 3, "pin")
+    monkeypatch.setattr(wd.wp, "choose_pin", lambda run, ssid, sleep=None, exclude=None: sel)
+    monkeypatch.setattr(wd.wp, "health_check", lambda run: wd.wp.HealthResult(False, 100, False))
+    wd.run_once(FakeRunner([UP, NOPIN]), 600, 1e9, st, lock)
+    assert wd.load_state(st)["excluded_bssids"] == ["AA:BB:CC:DD:EE:02"]
+
+
+def test_run_once_unhealthy_unpin_excludes_pin(tmp_path, monkeypatch):
+    st, lock = tmp_path / "s.json", tmp_path / "lock"
+    wd.save_state(st, wd.default_state() | {"up_since": 0, "health_failures": 1})
+    monkeypatch.setattr(wd.wp, "health_check", lambda run: wd.wp.HealthResult(False, 40, False))
+    lines = wd.run_once(FakeRunner([UP, PIN]), 200, 1e9, st, lock)
+    assert "UNPIN bssid=AA:BB:CC:DD:EE:01 reason=unhealthy roam_count=1" in lines
+    assert wd.load_state(st)["excluded_bssids"] == [P]
+
+
+def test_run_once_flapping_logs_unpin_and_reconnect(tmp_path):
+    st, lock = tmp_path / "s.json", tmp_path / "lock"
+    wd.save_state(st, wd.default_state() | {"drops": [[0, P], [100, P], [200, P]]})
+    lines = wd.run_once(FakeRunner([UP, PIN]), 300, 1e9, st, lock)
+    assert lines == ["UNPIN bssid=AA:BB:CC:DD:EE:01 reason=flapping drops=3 window=600 roam_count=1",
+                     "RECONNECT reason=flapping rc=0"]
+
+
+def test_profile_reset_clears_exclusions(tmp_path):
+    st, lock = tmp_path / "s.json", tmp_path / "lock"
+    wd.save_state(st, wd.default_state() | {"excluded_bssids": [P], "profile_uuid": "old"})
+    wd.run_once(FakeRunner([UP, NOPIN, (UUID, ok("new\n"))]), 0, 1e9, st, lock)
+    assert wd.load_state(st)["excluded_bssids"] == []

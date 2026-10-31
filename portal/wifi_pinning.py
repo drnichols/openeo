@@ -35,6 +35,8 @@ LOCK_STALE = 300
 FLAP_WINDOW = 600
 SELF_RECONNECT_GRACE = 30
 DROPS_KEEP = 3600
+FLAP_DROPS = 3
+FLAP_COOLOFF = 3600
 SETUP_LOCK = "/run/openeo-wifi-setup.lock"
 STATE_FILE = "/run/openeo-wifi-watchdog/state.json"
 CONNECTION_NAME = "custom-wifi"
@@ -108,7 +110,7 @@ class Selection:
     signal: int = None
     runner_up: int = None
     samples: int = 0
-    reason: str = "single"    # pin | single | weak | noscan
+    reason: str = "single"    # pin | single | weak | noscan | excluded
 
 
 def parse_scan(stdout):
@@ -125,8 +127,12 @@ def parse_scan(stdout):
     return rows
 
 
-def select_bssid(samples, ssid):
-    """Apply the selection rule to scan samples for the target SSID."""
+def select_bssid(samples, ssid, exclude=frozenset()):
+    """Apply the selection rule to scan samples for the target SSID.
+
+    The multi-AP test runs on every candidate; then BSSIDs in 'exclude' are passed over
+    for the pin, though they still count as the runner-up.
+    """
     if not samples:
         return Selection(reason="noscan")
 
@@ -147,7 +153,12 @@ def select_bssid(samples, ssid):
 
     if len(candidates) < 2:
         return Selection(samples=len(samples), reason="single")
-    best, second = candidates[0], candidates[1]
+    excluded = {norm_bssid(b) for b in exclude}
+    allowed = [c for c in candidates if norm_bssid(c[2]) not in excluded]
+    if not allowed:
+        return Selection(samples=len(samples), reason="excluded")
+    best = allowed[0]
+    second = next(c for c in candidates if c is not best)
     if best[0] < PIN_MIN_SIGNAL:
         return Selection(signal=best[0], runner_up=second[0], samples=len(samples), reason="weak")
     return Selection(best[2], best[0], second[0], len(samples), "pin")
@@ -171,8 +182,8 @@ def scan_samples(run, sleep=time.sleep):
     return samples
 
 
-def choose_pin(run, ssid, sleep=time.sleep):
-    return select_bssid(scan_samples(run, sleep), ssid)
+def choose_pin(run, ssid, sleep=time.sleep, exclude=frozenset()):
+    return select_bssid(scan_samples(run, sleep), ssid, exclude)
 
 
 # =========================
