@@ -424,3 +424,16 @@ def test_read_wpa_events_bad_cursor_falls_back_to_window():
 
 def test_read_wpa_events_empty_keeps_cursor():
     assert read_wpa_events(FakeRunner([(JQ, ok(""))]), "c1", "b1") == ([], "c1")
+
+
+def test_make_runner_skips_sudo_when_root(monkeypatch):
+    """sudo logs the full command line, which for nmcli modify includes the Wi-Fi PSK."""
+    import subprocess
+    import wifi_pinning as wpm
+    seen = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: seen.append(cmd) or subprocess.CompletedProcess(cmd, 0, "", ""))
+    monkeypatch.setattr(wpm.os, "geteuid", lambda: 0)
+    wpm.make_runner(sudo=True)(["nmcli", "x"])
+    monkeypatch.setattr(wpm.os, "geteuid", lambda: 1000)
+    wpm.make_runner(sudo=True)(["nmcli", "x"])
+    assert seen == [["nmcli", "x"], ["sudo", "nmcli", "x"]]

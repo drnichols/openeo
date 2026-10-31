@@ -5,6 +5,7 @@ list and returning a subprocess.CompletedProcess, which never raises. Tests inje
 fake one, so nothing here needs real hardware.
 """
 
+import os
 import json
 import math
 import re
@@ -55,9 +56,13 @@ WIFI_INTERFACE = "wlan0"
 # =========================
 
 def make_runner(sudo, timeout=120):
-    """Return a Runner. Missing binaries give rc 127 and timeouts rc 124."""
+    """Return a Runner. Missing binaries give rc 127 and timeouts rc 124.
+    sudo is skipped when already root: sudo logs each command line to the journal,
+    and the portal's nmcli calls carry the Wi-Fi password."""
+    use_sudo = sudo and os.geteuid() != 0
+
     def run(args):
-        cmd = (['sudo'] if sudo else []) + list(args)
+        cmd = (['sudo'] if use_sudo else []) + list(args)
         try:
             return subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=timeout)
         except FileNotFoundError:
