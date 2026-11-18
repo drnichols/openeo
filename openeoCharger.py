@@ -174,6 +174,8 @@ class openeoChargerClass:
             self.eco_7_switch = result[76]
             self.checksum = result[77:79]
 
+            self.log_status_change(result)
+
             ct=self.rs485.get_ct_readings()
             self.current_site=ct["site"]
             self.current_vehicle=ct["vehicle"]
@@ -229,6 +231,29 @@ class openeoChargerClass:
             return True
         
         return None
+
+    #################################################################################
+    # Diagnostics
+
+    # Status fields that may carry a fault indication (e.g. a DC leakage trip, which
+    # shows as three red flashes on the charger LED). Logged whenever any of them changes,
+    # with the raw packet, so the encoding can be worked out from a real trip.
+    STATUS_DIAG_FIELDS = ("current_switch_setting", "charger_state", "relay_state",
+                          "plug_state", "state_of_mains", "cp_line_state", "eco_7_switch")
+
+    last_status_diag = None
+
+    def log_status_change(self, raw):
+        """Log the diagnostic status fields and the raw packet when any of them changes."""
+        diag = tuple(getattr(self, f, None) for f in self.STATUS_DIAG_FIELDS)
+        if diag == self.last_status_diag:
+            return False
+        self.last_status_diag = diag
+        fields = " ".join("%s=%s" % (f, v) for f, v in zip(self.STATUS_DIAG_FIELDS, diag))
+        _LOGGER.info("Controller status changed: %s cp_voltage=%s plug_voltage=%s raw=%s"
+                     % (fields, getattr(self, "control_pilot_voltage", None),
+                        getattr(self, "plug_present_voltage", None), raw))
+        return True
 
     #################################################################################
     # Constructor methods
