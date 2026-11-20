@@ -102,12 +102,18 @@ class homeassistantClassPlugin(PluginSuperClass):
     def _setup_mqtt(self):
         """Initialize MQTT client and connect to broker"""
         try:
+            # A stable client_id lets the broker take over our old session the moment we
+            # reconnect. With paho's default empty id each reconnect is a new client, so the
+            # old session lingers until its keepalive expires (1.5x) and its retained
+            # "offline" will then overwrites the "online" we just published, leaving every
+            # HA entity unavailable while we carry on publishing state.
+            client_id = f"openeo-{self.get_config('device_id')}"
             if hasattr(mqtt, "CallbackAPIVersion"):
-                self.mqtt_client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
+                self.mqtt_client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
                 on_connect, on_disconnect = self._on_connect, self._on_disconnect
             else:
                 # paho-mqtt 1.x (Debian bookworm and older): v1 callbacks, adapted to the v2 signatures.
-                self.mqtt_client = mqtt.Client()
+                self.mqtt_client = mqtt.Client(client_id=client_id)
                 on_connect = lambda c, u, flags, rc: self._on_connect(c, u, flags, rc, None)
                 on_disconnect = lambda c, u, rc: self._on_disconnect(c, u, None, rc, None)
             self.mqtt_client.enable_logger(_PAHO_LOGGER)

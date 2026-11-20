@@ -46,7 +46,8 @@ class SetupTests(unittest.TestCase):
         with mock.patch.object(homeassistant.mqtt, "Client") as Client:
             p = make_plugin()
             p._setup_mqtt()
-        Client.assert_called_once_with(callback_api_version=homeassistant.mqtt.CallbackAPIVersion.VERSION2)
+        Client.assert_called_once_with(callback_api_version=homeassistant.mqtt.CallbackAPIVersion.VERSION2,
+                                       client_id="openeo-openeo_charger_1")
         c = Client.return_value
         self.assertEqual(c.on_connect_fail, p._on_connect_fail)
         c.connect_async.assert_called_once_with(BROKER_HOST, BROKER_PORT, 60)
@@ -65,7 +66,7 @@ class SetupTests(unittest.TestCase):
                 mock.patch.object(homeassistant.threading, "Thread"):
             p = make_plugin()
             p._setup_mqtt()
-            fake_mqtt.Client.assert_called_once_with()
+            fake_mqtt.Client.assert_called_once_with(client_id="openeo-openeo_charger_1")
             c = fake_mqtt.Client.return_value
             c.connect_async.assert_called_once_with(BROKER_HOST, BROKER_PORT, 60)
             with self.assertLogs(homeassistant._LOGGER, level="INFO") as cm:
